@@ -31,6 +31,7 @@ def load_excel_config(config_path):
     df_summary = pd.read_excel(xl, 'Summary', index_col=0)
     input_path = df_summary.loc['InputPath', 'Value']
     output_path = df_summary.loc['OutputPath', 'Value']
+    overwrite_yn = df_summary.loc['Overwrite', 'Value']
 
     # Load UnitConversion
     df_units = pd.read_excel(xl, 'UnitConversion')
@@ -39,13 +40,13 @@ def load_excel_config(config_path):
     df_units['UnitTo'] = df_units['UnitTo'].astype(str).str.strip()
     df_units['ConversionRate'] = pd.to_numeric(df_units['ConversionRate'])
     
-    return blueprint, asset_groups, input_path, output_path, df_units
+    return blueprint, asset_groups, input_path, output_path, df_units, overwrite_yn
 
 def execute_pipeline(config_path):
     print(f"[+] Initializing report generation from: {config_path}")
-    blueprint, asset_groups, input_path, output_path, df_units = load_excel_config(config_path)
+    blueprint, asset_groups, input_path, output_path, df_units, overwrite = load_excel_config(config_path)
     
-    parquet_base_dir = convert_zip_to_parquet(input_path)
+    parquet_base_dir = convert_zip_to_parquet(input_path, overwrite=overwrite)
     if parquet_base_dir is None: return
     
     base_dir_clean = str(parquet_base_dir).replace('\\', '/')
