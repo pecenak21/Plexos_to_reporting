@@ -106,14 +106,14 @@ def process_daily_block(parquet_base_dir, property_name, years, unique_months, c
     return pd.concat(all_chunks)
 
 
-def process_emissions_block(parquet_base_dir, gas_name, target_header, years, unique_months, df_units, class_name, temporal_pattern, is_rate=False):
+def process_emissions_block(parquet_base_dir, gas_name, target_header, years, unique_months, df_units, class_name, temporal_pattern, is_rate=False, explicit_unit=None):
 
     # Existing functionality preserved
     df_pivoted = pull_pivoted_data(parquet_base_dir, 'Production', unique_months, emission_gas_name=gas_name, is_rate=False)
     if df_pivoted.empty: return pd.DataFrame()
     
     df_pivoted = df_pivoted.groupby('Object_Name')[list(unique_months)].sum()
-    scale_factor, _ = get_automatic_scale_factor(parquet_base_dir, 'Production', target_header, df_units)
+    scale_factor, _ = get_automatic_scale_factor(parquet_base_dir, target_header, df_units, explicit_unit=explicit_unit)
     df_pivoted = df_pivoted * scale_factor
     
     # Create an explicit copy so Pandas knows you own this data
@@ -136,22 +136,22 @@ def process_emissions_block(parquet_base_dir, gas_name, target_header, years, un
 
     return df_grid
 
-def process_flat_block(parquet_base_dir, property_name, header_name, years, unique_months, df_units,  category_list=None, class_name=None, is_rate=False, temporal_pattern="monthly"):
-    df_pivoted = pull_pivoted_data(parquet_base_dir, property_name, unique_months, category_list=category_list, class_name=class_name, is_rate=is_rate)
+def process_flat_block(parquet_base_dir, property_name, header_name, years, unique_months, df_units, category_list=None, class_name=None, is_rate=False, temporal_pattern="monthly", timeslice_name="All Periods", explicit_unit=None):
+    df_pivoted = pull_pivoted_data(parquet_base_dir, property_name, unique_months, category_list=category_list, class_name=class_name, is_rate=is_rate, timeslice_name=timeslice_name)
     if df_pivoted.empty: return pd.DataFrame()
     df_pivoted = df_pivoted.groupby('Object_Name')[list(unique_months)].sum()
-    scale_factor, _ = get_automatic_scale_factor(parquet_base_dir, property_name, header_name, df_units)
+    
+    # Pass explicit_unit instead of header_name to your scale factor function
+    scale_factor, _ = get_automatic_scale_factor(parquet_base_dir, property_name, df_units, explicit_unit=explicit_unit)
     df_pivoted = df_pivoted * scale_factor
     
     # When creating df_grid, ensure it's a fresh object
     if is_rate:
         df_grid, _ = build_rate_totals(df_pivoted, years, unique_months)
-        # Use .copy() to force a new object and avoid warning
         df_grid = df_grid.copy()
         df_grid.loc['Total'] = df_grid.replace(0, np.nan).mean(axis=0).fillna(0)
     else:
         df_grid, _ = build_sum_totals(df_pivoted, years, unique_months)
-        # Use .copy() to force a new object and avoid warning
         df_grid = df_grid.copy()
         df_grid.loc['Total'] = df_grid.sum(axis=0)
     
@@ -166,12 +166,37 @@ def process_flat_block(parquet_base_dir, property_name, header_name, years, uniq
     df_grid.index.name = ''
     return df_grid
 
-def process_banded_block(parquet_base_dir, property_name, header_name, years, unique_months, category_list=None, class_name=None, is_rate=False, temporal_pattern="monthly"):
-    # (Existing banded logic)
-    df_pivoted = pull_pivoted_data(parquet_base_dir, property_name, unique_months, category_list=category_list, class_name=class_name, is_rate=False)
+def process_ratings_block(parquet_base_dir, property_name, alias, years, unique_months, df_units, category_list=None, class_name=None, is_rate=False, timeslice_name="All Periods", explicit_unit=None):
+    # Reuse pull_pivoted_data since it fetches the raw matrix correctly
+    df_pivoted = pull_pivoted_data(parquet_base_dir, property_name, unique_months, category_list=category_list, class_name=class_name, is_rate=is_rate, timeslice_name=timeslice_name)
     if df_pivoted.empty: return pd.DataFrame()
-    # ... (Rest of your banded implementation) ...
-    return pd.DataFrame() 
+    
+    df_pivoted = df_pivoted.groupby('Object_Name')[list(unique_months)].sum()
+    
+    # Apply automatic unit scaling
+    scale_factor, _ = get_automatic_scale_factor(parquet_base_dir, property_name, df_units, explicit_unit=explicit_unit)
+    df_pivoted = df_pivoted * scale_factor
+    
+    # Build totals grid without keeping intermediate total rows
+    if is_rate:
+        df_grid, _ = build_rate_totals(df_pivoted, years, unique_months)
+        df_grid = df_grid.copy()
+        df_grid.loc['Total'] = df_grid.replace(0, np.nan).mean(axis=0).fillna(0)
+    else:
+        df_grid, _ = build_sum_totals(df_pivoted, years, unique_months)
+        df_grid = df_grid.copy()
+        df_grid.loc['Total'] = df_grid.sum(axis=0)
+        
+    # Drop the 'Total' row so it doesn't get repeated between properties
+    if 'Total' in df_grid.index:
+        df_grid = df_grid.drop('Total')
+        
+    # Append the alias/unit to each item name in the index (e.g., "Arlington A:MW")
+    if alias and str(alias).strip().lower() != 'nan':
+        df_grid.index = [f"{idx}:{alias}" for idx in df_grid.index]
+        
+    df_grid.index.name = ''
+    return df_grid
 
 def build_sum_totals(df_pivot, years, unique_months):
     final_columns = []
@@ -199,7 +224,7 @@ def build_rate_totals(df_pivot, years, unique_months):
     final_columns.append('Total')
     return df_pivot[final_columns], final_columns
 
-def build_combined_emissions_section(parquet_base_dir, topline_header, years, unique_months, df_units, class_name=None, temporal_pattern="monthly", is_rate=False):
+def build_combined_emissions_section(parquet_base_dir, topline_header, years, unique_months, df_units, class_name=None, temporal_pattern="monthly", is_rate=False, explicit_unit=None):
     
     # Dynamically find gases
     gas_query = "SELECT DISTINCT ParentObjectName FROM mem_fki WHERE ParentClassName = 'Emission'"
@@ -216,7 +241,7 @@ def build_combined_emissions_section(parquet_base_dir, topline_header, years, un
     for gas in sorted(all_gases): 
         sub_header = f"Total Effluents (lb) -- {gas}"
         # Pass the pattern through to the processor
-        df_gas = process_emissions_block(parquet_base_dir, gas, topline_header, years, unique_months, df_units, class_name, temporal_pattern)
+        df_gas = process_emissions_block(parquet_base_dir, gas, topline_header, years, unique_months, df_units, class_name, temporal_pattern,explicit_unit=explicit_unit)
                 
         if not df_gas.empty:
             df_gas = df_gas.reset_index()

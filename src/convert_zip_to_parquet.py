@@ -47,13 +47,16 @@ def convert_zip_to_parquet(zip_file_path, output_dir=None, overwrite=False):
         output_dir = zip_path.parent / zip_path.stem
     else:
         output_dir = Path(output_dir)
-
+    print(output_dir,output_dir.exists())
     # Handle existing directory
     if output_dir.exists():
+        print('here')
         if overwrite:
+            print('if')
             print(f"[!] Overwrite enabled. Removing existing: {output_dir}")
             shutil.rmtree(output_dir)
         else:
+            print('else')
             print(f"[~] Directory exists. Skipping: {output_dir}")
             return output_dir
             

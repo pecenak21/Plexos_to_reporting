@@ -23,7 +23,7 @@ def initialize_database_structures(base_dir):
         duckdb.query(f"CREATE VIEW v_data AS SELECT * FROM read_parquet('{data_path}')")
 
 
-def get_automatic_scale_factor(base_dir, property_name, target_header, df_units):
+def get_automatic_scale_factor(base_dir, property_name, df_units, explicit_unit):
     initialize_database_structures(base_dir)
     lookup_prop = property_name[0] if isinstance(property_name, list) else property_name
     
@@ -32,10 +32,8 @@ def get_automatic_scale_factor(base_dir, property_name, target_header, df_units)
     row = duckdb.query(query).fetchone()
     db_unit = row[0].strip() if row else ""
     
-    # Get Target Unit
-    matches = re.findall(r'\(([^)]+)\)', target_header)
-    units = [m.strip() for m in matches if not m.strip().isdigit()]
-    target_unit = units[-1] if units else ""
+    # Target Unit is now strictly the explicit unit passed from the blueprint
+    target_unit = str(explicit_unit).strip() if explicit_unit and str(explicit_unit).strip().lower() != 'nan' else ""
 
     # Lookup in the provided df_units
     match = df_units[
@@ -51,7 +49,7 @@ def get_automatic_scale_factor(base_dir, property_name, target_header, df_units)
         print(f"    / Unit: No rule for '{db_unit}' > '{target_unit}'")
         return 1.0, True
 
-def pull_pivoted_data(base_dir, property_name, unique_months, category_list=None, class_name=None, emission_gas_name=None, is_rate=False, temporal_pattern="monthly"):
+def pull_pivoted_data(base_dir, property_name, unique_months, category_list=None, class_name=None, emission_gas_name=None, is_rate=False, temporal_pattern="monthly", timeslice_name="All Periods"):
     """
     Executes a high-performance database PIVOT with case-insensitive and trailing-whitespace tolerant filters.
     
@@ -63,6 +61,7 @@ def pull_pivoted_data(base_dir, property_name, unique_months, category_list=None
         class_name (str, optional): The class of objects to filter for (e.g., 'Buildings'). Defaults to None.
         emission_gas_name (str, optional): If provided, overrides settings to focus on gas-specific production data. Defaults to None.
         temporal_pattern (str, optional): Defines the aggregation level. Defaults to "monthly"; can be set to "daily".
+        timeslice_name (str,optional): which timeslice to pull the data from
     """
 
     # Use the parameter to set the aggregation function
@@ -86,6 +85,8 @@ def pull_pivoted_data(base_dir, property_name, unique_months, category_list=None
         if valid_cats:
             placeholders = ", ".join(f"'{str(cat).lower().strip()}'" for cat in valid_cats)
             sub_conditions.append(f"LOWER(TRIM(f.ChildObjectCategoryName)) IN ({placeholders})")
+
+    sub_conditions.append(f"LOWER(TRIM(f.TimesliceName)) = '{timeslice_name.lower().strip()}'")
     
     master_filter = " AND ".join(sub_conditions)
     
