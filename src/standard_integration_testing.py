@@ -19,6 +19,9 @@ class TeeLogger:
     def flush(self):
         self.terminal.flush()
         self.log.flush()
+        
+    def close(self):
+        self.log.close()
 
 def parse_report_into_sections(filepath):
     sections = {}
@@ -115,37 +118,50 @@ def compare_report_files(golden_path, generated_path, report_name="Report", tole
         print(f"  [FAIL] Discrepancies detected in {report_name}.")
         return False
 
-if __name__ == "__main__":
-    baseline_dir = r"C:/Users/pecen/Plexos_to_reporting/docs/Baseline Reports"
-    newreport_dir = "C:/Users/pecen/Downloads/"
-    
-    # Setup automatic log file output in the target directory
+def run_sit_validation(baseline_dir, newreport_dir):
+    """Callable function to execute SIT validation from your main pipeline."""
     log_file_path = os.path.join(baseline_dir, "SIT_Test_Results.log")
-    sys.stdout = TeeLogger(log_file_path)
+    original_stdout = sys.stdout
+    tee = TeeLogger(log_file_path)
+    sys.stdout = tee
     
-    print(f"==================================================")
-    print(f" Systems Integration Testing (SIT) Execution Log")
-    print(f" Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"==================================================")
-    
-    # Validate Standard Report
-    std_pass = compare_report_files(
-        golden_path=os.path.join(baseline_dir, "Standard_Report.csv"),
-        generated_path=os.path.join(newreport_dir, "Standard_Report.csv"),
-        report_name="Standard Report"
-    )
-    
-    # Validate Ratings Report
-    rat_pass = compare_report_files(
-        golden_path=os.path.join(baseline_dir, "Ratings_Report.csv"),
-        generated_path=os.path.join(newreport_dir, "Ratings_Report.csv"),
-        report_name="Ratings Report"
-    )
-    
-    print("\n--------------------------------------------------")
-    if std_pass and rat_pass:
-        print("[SUCCESS] All SIT validation checks passed successfully!")
-    else:
-        print("[WARNING] Some SIT validation checks failed. Review logs above.")
-    print("--------------------------------------------------")
-    print(f"Log saved successfully to: {log_file_path}")
+    try:
+        print(f"==================================================")
+        print(f" Systems Integration Testing (SIT) Execution Log")
+        print(f" Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"==================================================")
+        
+        # Validate Standard Report
+        std_pass = compare_report_files(
+            golden_path=os.path.join(baseline_dir, "Standard_Report.csv"),
+            generated_path=os.path.join(newreport_dir, "Standard_Report.csv"),
+            report_name="Standard Report"
+        )
+        
+        # Validate Ratings Report
+        rat_pass = compare_report_files(
+            golden_path=os.path.join(baseline_dir, "Ratings_Report.csv"),
+            generated_path=os.path.join(newreport_dir, "Ratings_Report.csv"),
+            report_name="Ratings Report"
+        )
+        
+        print("\n--------------------------------------------------")
+        if std_pass and rat_pass:
+            print("[SUCCESS] All SIT validation checks passed successfully!")
+            overall_success = True
+        else:
+            print("[WARNING] Some SIT validation checks failed. Review logs above.")
+            overall_success = False
+        print("--------------------------------------------------")
+        print(f"Log saved successfully to: {log_file_path}")
+        
+        return overall_success
+        
+    finally:
+        sys.stdout = original_stdout
+        tee.close()
+
+if __name__ == "__main__":
+    b_dir = r"C:/Users/pecen/Plexos_to_reporting/docs/Baseline Reports"
+    n_dir = r"C:/Users/pecen/Downloads/"
+    run_sit_validation(b_dir, n_dir)

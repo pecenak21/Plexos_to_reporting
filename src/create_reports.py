@@ -5,6 +5,7 @@ import duckdb
 from collections import defaultdict
 from convert_zip_to_parquet import convert_zip_to_parquet
 from transformers import (process_flat_block, process_daily_block, build_combined_emissions_section, process_ratings_block)
+from standard_integration_testing import run_sit_validation
 
 def load_excel_config(config_path):
     xl = pd.ExcelFile(config_path)
@@ -43,8 +44,11 @@ def load_excel_config(config_path):
     # Load Paths & Settings
     df_summary = pd.read_excel(xl, 'Summary', index_col=0)
     input_path = df_summary.loc['InputPath', 'Value']
+    script_path = df_summary.loc['ScriptPath', 'Value']
+    script_path = script_path.split('src')[0]
     base_output_path = df_summary.loc['OutputPath', 'Value']
-    overwrite_yn = df_summary.loc['Overwrite', 'Value']
+    overwrite_yn = df_summary.loc['Overwrite_Parquet', 'Value']
+    integration_test_yn = df_summary.loc['Run_Integration_Test', 'Value']
 
     # Load UnitConversion
     df_units = pd.read_excel(xl, 'UnitConversion')
@@ -52,7 +56,7 @@ def load_excel_config(config_path):
     df_units['UnitTo'] = df_units['UnitTo'].astype(str).str.strip()
     df_units['ConversionRate'] = pd.to_numeric(df_units['ConversionRate'])
     
-    return blueprint, blueprint_rat, asset_groups, input_path, base_output_path, df_units, overwrite_yn
+    return blueprint, blueprint_rat, asset_groups, input_path, base_output_path, df_units, overwrite_yn, integration_test_yn, script_path
 
 
 def execute_standard_report(parquet_base_dir, blueprint, asset_groups, output_path, years, unique_months, df_units):
@@ -158,7 +162,7 @@ def execute_timeslice_report(parquet_base_dir, blueprint_rat, asset_groups, outp
 
 def execute_pipeline(config_path):
     print(f"[+] Initializing report generation from: {config_path}")
-    blueprint, blueprint_rat, asset_groups, input_path, base_output_path, df_units, overwrite = load_excel_config(config_path)
+    blueprint, blueprint_rat, asset_groups, input_path, dir_name, df_units, overwrite, run_testing, script_path = load_excel_config(config_path)
 
     parquet_base_dir = convert_zip_to_parquet(input_path, overwrite=overwrite)
     if parquet_base_dir is None: return
@@ -178,9 +182,6 @@ def execute_pipeline(config_path):
     years = sorted(time_df['Year'].unique())
     unique_months = time_df['Month_Label'].unique()
     
-    # Split the base output path to append unique hardcoded filenames
-    dir_name = os.path.dirname(base_output_path)
-    
     # Execute Standard Report if blueprint is provided
     if blueprint:
         std_output_path = os.path.join(dir_name, "Standard_Report.csv")
@@ -192,6 +193,16 @@ def execute_pipeline(config_path):
         execute_timeslice_report(parquet_base_dir, blueprint_rat, asset_groups, rat_output_path, years, unique_months, df_units)
         
     print("[+] All report generation complete.")
+
+    if run_testing:
+        baseline_dir = f"{script_path}/docs/Baseline Reports"
+        output_dir = dir_name
+        
+        passed = run_sit_validation(baseline_dir, output_dir)
+        if not passed:
+            raise RuntimeError("SIT validation failed against baseline reports.")
+        
+    print("[+] Report testing complete.")
 
 
 if __name__ == "__main__":
