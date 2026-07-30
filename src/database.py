@@ -148,3 +148,17 @@ def pull_pivoted_data(base_dir, property_name, unique_months, category_list=None
     except Exception:
         # Fallback for query execution errors
         return pd.DataFrame()
+
+def apply_asset_mapping(df_pivoted, asset_mapping_df):
+    if not asset_mapping_df or df_pivoted.empty:
+        return df_pivoted
+    
+    # Here we map it, defaulting to its original name if no mapping is provided:
+    df_pivoted['Object_Name'] = df_pivoted['Object_Name'].map(asset_mapping_df).fillna(df_pivoted['Object_Name'])
+    
+    # If multiple Plexos names map to one RTSim name, group them and sum their metrics
+    # Identify value columns (everything except dimensions)
+    dim_cols = [c for c in ['Object_Name', 'band_id', 'Year', 'Day_Id', 'Timeslice'] if c in df_pivoted.columns]
+    val_cols = [c for c in df_pivoted.columns if c not in dim_cols]
+    
+    return df_pivoted.groupby(dim_cols, as_index=False)[val_cols].sum()

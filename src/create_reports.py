@@ -55,11 +55,14 @@ def load_excel_config(config_path):
     df_units['UnitFrom'] = df_units['UnitFrom'].astype(str).str.strip()
     df_units['UnitTo'] = df_units['UnitTo'].astype(str).str.strip()
     df_units['ConversionRate'] = pd.to_numeric(df_units['ConversionRate'])
+
+    df_map = pd.read_excel(xl, 'Generator_name_map')
+    asset_mapping = dict(zip(df_map['Resources_Plexos'], df_map['Resources_RTSim']))
     
-    return blueprint, blueprint_rat, asset_groups, input_path, base_output_path, df_units, overwrite_yn, integration_test_yn, script_path
+    return blueprint, blueprint_rat, asset_groups, input_path, base_output_path, df_units, overwrite_yn, integration_test_yn, script_path, asset_mapping
 
 
-def execute_standard_report(parquet_base_dir, blueprint, asset_groups, output_path, years, unique_months, df_units):
+def execute_standard_report(parquet_base_dir, blueprint, asset_groups, output_path, years, unique_months, df_units, asset_mapping):
     print("[+] Building Standard Report...")
     grouped_blueprint = defaultdict(list)
     for entry in blueprint:
@@ -82,17 +85,17 @@ def execute_standard_report(parquet_base_dir, blueprint, asset_groups, output_pa
             is_banded = False
             
             if c_in == "Emission":
-                df_block = build_combined_emissions_section(parquet_base_dir, header, years, unique_months, df_units=df_units, class_name=c_in, is_rate=is_rate, temporal_pattern=temp_pattern, explicit_unit=unit_val)
+                df_block = build_combined_emissions_section(parquet_base_dir, header, years, unique_months, df_units=df_units, class_name=c_in, is_rate=is_rate, temporal_pattern=temp_pattern, explicit_unit=unit_val, asset_mapping=asset_mapping)
                 idx_flag, header_flag = True, False
             elif temp_pattern == "daily":
-                df_block = process_daily_block(parquet_base_dir, prop_input, years, unique_months, class_name=c_in, is_rate=is_rate, temporal_pattern=temp_pattern)
+                df_block = process_daily_block(parquet_base_dir, prop_input, years, unique_months, class_name=c_in, is_rate=is_rate, temporal_pattern=temp_pattern, asset_mapping=asset_mapping)
                 idx_flag, header_flag = True, False
             else:
                 df_block = process_flat_block(
                     parquet_base_dir, prop_input, header, years, unique_months, 
                     df_units=df_units, category_list=target_categories, 
                     class_name=c_in, is_rate=is_rate, temporal_pattern=temp_pattern,
-                    explicit_unit=unit_val
+                    explicit_unit=unit_val, asset_mapping=asset_mapping
                 )
                 idx_flag, header_flag = True, True
                 
@@ -113,7 +116,7 @@ def execute_standard_report(parquet_base_dir, blueprint, asset_groups, output_pa
             f.write("\n\n")
 
 
-def execute_timeslice_report(parquet_base_dir, blueprint_rat, asset_groups, output_path, years, unique_months, df_units):
+def execute_timeslice_report(parquet_base_dir, blueprint_rat, asset_groups, output_path, years, unique_months, df_units, asset_mapping=None):
     print("[+] Building Timeslice Report...")
     timeslice_query = "SELECT DISTINCT TimesliceName FROM mem_fki ORDER BY TimesliceId"
     timeslices = duckdb.query(timeslice_query).df()['TimesliceName'].tolist()
@@ -137,7 +140,7 @@ def execute_timeslice_report(parquet_base_dir, blueprint_rat, asset_groups, outp
                 category_list=target_categories,
                 class_name=c_in,
                 timeslice_name=ts_name,
-                explicit_unit=unit_val
+                explicit_unit=unit_val, asset_mapping=asset_mapping
             )
             
             if df_block is not None and not df_block.empty:
@@ -162,7 +165,7 @@ def execute_timeslice_report(parquet_base_dir, blueprint_rat, asset_groups, outp
 
 def execute_pipeline(config_path):
     print(f"[+] Initializing report generation from: {config_path}")
-    blueprint, blueprint_rat, asset_groups, input_path, dir_name, df_units, overwrite, run_testing, script_path = load_excel_config(config_path)
+    blueprint, blueprint_rat, asset_groups, input_path, dir_name, df_units, overwrite, run_testing, script_path, asset_mapping = load_excel_config(config_path)
 
     parquet_base_dir = convert_zip_to_parquet(input_path, overwrite=overwrite)
     if parquet_base_dir is None: return
@@ -181,24 +184,26 @@ def execute_pipeline(config_path):
     
     years = sorted(time_df['Year'].unique())
     unique_months = time_df['Month_Label'].unique()
+
+    os.makedirs(dir_name, exist_ok=True)
     
     # Execute Standard Report if blueprint is provided
     if blueprint:
+        
         std_output_path = os.path.join(dir_name, "Standard_Report.csv")
-        execute_standard_report(parquet_base_dir, blueprint, asset_groups, std_output_path, years, unique_months, df_units)
+        execute_standard_report(parquet_base_dir, blueprint, asset_groups, std_output_path, years, unique_months, df_units, asset_mapping)
         
     # Execute Timeslice Report if blueprint_rat is provided
     if blueprint_rat:
         rat_output_path = os.path.join(dir_name, "Ratings_Report.csv")
-        execute_timeslice_report(parquet_base_dir, blueprint_rat, asset_groups, rat_output_path, years, unique_months, df_units)
+        execute_timeslice_report(parquet_base_dir, blueprint_rat, asset_groups, rat_output_path, years, unique_months, df_units, asset_mapping)
         
     print("[+] All report generation complete.")
 
     if run_testing:
         baseline_dir = f"{script_path}/docs/Baseline Reports"
-        output_dir = dir_name
         
-        passed = run_sit_validation(baseline_dir, output_dir)
+        passed = run_sit_validation(baseline_dir, dir_name)
         if not passed:
             raise RuntimeError("SIT validation failed against baseline reports.")
         
