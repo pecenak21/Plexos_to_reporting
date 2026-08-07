@@ -4,7 +4,7 @@ import pandas as pd
 import duckdb
 from collections import defaultdict
 from convert_zip_to_parquet import convert_zip_to_parquet
-from transformers import (process_flat_block, process_daily_block, build_combined_emissions_section, process_ratings_block)
+from transformers import (process_flat_block, process_daily_block, process_nested_block, process_ratings_block, process_3_block)
 from standard_integration_testing import run_sit_validation
 
 def load_excel_config(config_path):
@@ -83,21 +83,45 @@ def execute_standard_report(parquet_base_dir, blueprint, asset_groups, output_pa
             g_in = str(group_input).strip()
             target_categories = asset_groups.get((c_in, g_in), None)
             is_banded = False
+            nested=False
+            parent_in = c_in
+            child_in = ""
+             
+            if '.' in c_in:
+                nested=True
+                parent_in=c_in.split('.')[0]
+                child_in=c_in.split('.')[1]
+                target_categories = asset_groups.get((parent_in, g_in), None)
             
-            if c_in == "Emission":
-                df_block = build_combined_emissions_section(parquet_base_dir, header, years, unique_months, df_units=df_units, class_name=c_in, is_rate=is_rate, temporal_pattern=temp_pattern, explicit_unit=unit_val, asset_mapping=asset_mapping)
-                idx_flag, header_flag = True, False
-            elif temp_pattern == "daily":
-                df_block = process_daily_block(parquet_base_dir, prop_input, years, unique_months, class_name=c_in, is_rate=is_rate, temporal_pattern=temp_pattern, asset_mapping=asset_mapping)
-                idx_flag, header_flag = True, False
-            else:
-                df_block = process_flat_block(
-                    parquet_base_dir, prop_input, header, years, unique_months, 
+            if header == "( 3 ) Thermal Unit Fuel Use (MBTU)":
+                print(f"HERE IS THE HEADER: {header}")
+                df_block = process_3_block(
+                    parquet_base_dir, parent_in, child_in, header, years, unique_months, 
                     df_units=df_units, category_list=target_categories, 
                     class_name=c_in, is_rate=is_rate, temporal_pattern=temp_pattern,
                     explicit_unit=unit_val, asset_mapping=asset_mapping
                 )
-                idx_flag, header_flag = True, True
+                idx_flag, header_flag = False, True
+            elif temp_pattern == "daily":
+                df_block = process_daily_block(parquet_base_dir, prop_input, years, unique_months, class_name=c_in, is_rate=is_rate, temporal_pattern=temp_pattern, asset_mapping=asset_mapping)
+                idx_flag, header_flag = True, False
+            else:
+                if nested:
+                    df_block = process_nested_block(
+                        parquet_base_dir, prop_input, parent_in, child_in, header, years, unique_months, 
+                        df_units=df_units, category_list=target_categories, 
+                        class_name=c_in, is_rate=is_rate, temporal_pattern=temp_pattern,
+                        explicit_unit=unit_val, asset_mapping=asset_mapping
+                    )
+                    idx_flag, header_flag = False, True
+                else:
+                    df_block = process_flat_block(
+                        parquet_base_dir, prop_input, header, years, unique_months, 
+                        df_units=df_units, category_list=target_categories, 
+                        class_name=c_in, is_rate=is_rate, temporal_pattern=temp_pattern,
+                        explicit_unit=unit_val, asset_mapping=asset_mapping
+                    )
+                    idx_flag, header_flag = True, True
                 
             if df_block is not None and not df_block.empty:
                 print(f"    - Data retrieved for: {prop_input}")

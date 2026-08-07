@@ -136,7 +136,6 @@ def process_emissions_block(parquet_base_dir, gas_name, target_header, years, un
     
     # Now you can safely set the index and the 'Total' row
     df_grid.loc['Total'] = df_grid.sum(axis=0)
-    # --- FIX ENDS HERE ---
     
     df_grid.index.name = ''
     # Logic for monthly-summary to filter only the total row
@@ -150,8 +149,16 @@ def process_emissions_block(parquet_base_dir, gas_name, target_header, years, un
 
     return df_grid
 
-def process_flat_block(parquet_base_dir, property_name, header_name, years, unique_months, df_units, category_list=None, class_name=None, is_rate=False, temporal_pattern="monthly", timeslice_name="All Periods", explicit_unit=None, asset_mapping=None):
-    df_pivoted = pull_pivoted_data(parquet_base_dir, property_name, unique_months, category_list=category_list, class_name=class_name, is_rate=is_rate, timeslice_name=timeslice_name)
+def process_flat_block(parquet_base_dir, property_name, header_name, years, unique_months, df_units, category_list=None, class_name=None, is_rate=False, temporal_pattern="monthly", timeslice_name="All Periods", explicit_unit=None, asset_mapping=None, parent_name=None,testy=False):
+
+    df_pivoted = pull_pivoted_data(parquet_base_dir, property_name, unique_months, category_list=category_list, class_name=class_name, is_rate=is_rate, timeslice_name=timeslice_name, parent_name=parent_name)
+
+    if df_pivoted.empty: 
+        print(f"[DEBUG] ---> Result was EMPTY for property '{property_name}' under parent '{parent_name}'.")
+        return pd.DataFrame()
+    
+    df_pivoted = pull_pivoted_data(parquet_base_dir, property_name, unique_months, category_list=category_list, class_name=class_name, is_rate=is_rate, timeslice_name=timeslice_name, parent_name=parent_name)
+
     if df_pivoted.empty: return pd.DataFrame()
 
     # Code to map the names to provided RTsim names
@@ -247,34 +254,127 @@ def build_rate_totals(df_pivot, years, unique_months):
     final_columns.append('Total')
     return df_pivot[final_columns], final_columns
 
-def build_combined_emissions_section(parquet_base_dir, topline_header, years, unique_months, df_units, class_name=None, temporal_pattern="monthly", is_rate=False, explicit_unit=None, asset_mapping=None):
+def process_nested_block(parquet_base_dir, property_name, parent_name, child_name, header_name, years, unique_months, df_units, category_list=None, class_name=None, is_rate=False, temporal_pattern="monthly", timeslice_name="All Periods", explicit_unit=None, asset_mapping=None): 
     
-    # Dynamically find gases
-    gas_query = "SELECT DISTINCT ParentObjectName FROM mem_fki WHERE ParentClassName = 'Emission'"
-    result = duckdb.query(gas_query).df()
+    cat_items = category_list if isinstance(category_list, list) else [category_list]
+    valid_cats = [str(cat).strip() for cat in cat_items if cat is not None and str(cat).lower().strip() != 'all']
+
+    if valid_cats:
+        placeholders = str(tuple(valid_cats)) if len(valid_cats) > 1 else f"('{valid_cats[0]}')"
+        parent_query = f""" SELECT DISTINCT ParentObjectName FROM mem_fki WHERE ParentClassName = '{parent_name}' AND ParentObjectCategoryName IN {placeholders}"""
+    else:
+        parent_query = f"""SELECT DISTINCT ParentObjectName FROM mem_fki WHERE ParentClassName = '{parent_name}'"""
+
+    result = duckdb.query(parent_query).df()
     
     # 2. Defensive check
     if result.empty or 'ParentObjectName' not in result.columns:
-        print(f"Warning: No emission gases found in mem_fki. Columns found: {result.columns.tolist()}")
+        print(f"Warning: Data not found in mem_fki. Columns found: {result.columns.tolist()}")
         return pd.DataFrame()
         
-    all_gases = result['ParentObjectName'].tolist()
-    
+    all_parents = result['ParentObjectName'].tolist()
+
+    mapped_parents = [asset_mapping.get(item, item) for item in all_parents]
+
     combined_rows = []
-    for gas in sorted(all_gases): 
-        sub_header = f"Total Effluents (lb) -- {gas}"
-        # Pass the pattern through to the processor
-        df_gas = process_emissions_block(parquet_base_dir, gas, topline_header, years, unique_months, df_units, class_name, temporal_pattern,explicit_unit=explicit_unit,asset_mapping=asset_mapping)
-                
-        if not df_gas.empty:
-            df_gas = df_gas.reset_index()
+    for idx, parent in enumerate(all_parents): 
+        print(parent_name)
+        if parent_name == "Emission":
+            sub_header = f"Total Effluents (lb) -- {mapped_parents[idx]}"
+        else:
+            sub_header = f"{mapped_parents[idx]}"
 
-            header_vals = pd.DataFrame([df_gas.columns], columns=df_gas.columns)
-            df_final = pd.concat([header_vals, df_gas], ignore_index=True)
+        df_data = process_flat_block(parquet_base_dir, property_name, header_name, years, unique_months, df_units, category_list=None, class_name=None, is_rate=is_rate, temporal_pattern=temporal_pattern, timeslice_name="All Periods", explicit_unit=explicit_unit, asset_mapping=asset_mapping, parent_name=parent)
+        
+        if not df_data.empty:
+            # 1. Reset the index so the gas names become an actual data column instead of a hidden index
+            df_data = df_data.reset_index()
 
-            subheader_row = pd.DataFrame(index=[sub_header], columns=df_gas.columns)
-            spacer_df = pd.DataFrame(index=[''], columns=df_gas.columns)
+            # 2. Create the header row 
+            header_vals = pd.DataFrame([df_data.columns], columns=df_data.columns)
+            df_final = pd.concat([header_vals, df_data], ignore_index=True)
+
+            # 3. Build the subheader row matching the width of the dataframe
+            subheader_data = [sub_header] + [''] * (len(df_data.columns) - 1)
+            subheader_row = pd.DataFrame([subheader_data], columns=df_data.columns)
+            
+            # 4. Spacer row
+            spacer_data = [''] * len(df_data.columns)
+            spacer_df = pd.DataFrame([spacer_data], columns=df_data.columns)
             
             combined_rows.extend([subheader_row, df_final, spacer_df])
             
-    return pd.concat(combined_rows) if combined_rows else pd.DataFrame()
+    # Return everything with a clean sequential index that you can completely drop on export
+    return pd.concat(combined_rows, ignore_index=True) if combined_rows else pd.DataFrame()
+
+
+    # bespoke code for fuels
+def process_3_block(parquet_base_dir, parent_name, child_name, header_name, years, unique_months, df_units, category_list=None, class_name=None, is_rate=False, temporal_pattern="monthly", timeslice_name="All Periods", explicit_unit=None, asset_mapping=None):
+    """
+    Custom block generator for '( 3 ) Thermal Unit Fuel Use (MBTU)'
+    Takes flat outputs for Fuel Offtake and Start Fuel Offtake and formats them 
+    into the custom parent/sub-row structure without a bottom totals row.
+    """
+    # 1. Pull the flat block for "Fuel Offtake" across all generators
+    df_fuel = process_flat_block(
+        parquet_base_dir, "Fuel Offtake", header_name, years, unique_months, 
+        df_units=df_units, category_list=category_list, class_name=class_name, is_rate=is_rate, 
+        temporal_pattern=temporal_pattern, timeslice_name=timeslice_name, 
+        explicit_unit=explicit_unit, asset_mapping=asset_mapping, parent_name=None
+    )
+
+    # 2. Pull the flat block for "Start Fuel Offtake" across all generators
+    df_start = process_flat_block(
+        parquet_base_dir, "Start Fuel Offtake", header_name, years, unique_months, 
+        df_units=df_units, category_list=category_list, class_name=class_name, is_rate=is_rate, 
+        temporal_pattern=temporal_pattern, timeslice_name=timeslice_name, 
+        explicit_unit=explicit_unit, asset_mapping=asset_mapping, parent_name=None
+    )
+
+    if df_fuel.empty:
+        return pd.DataFrame()
+
+    # Drop any summary rows like 'Total' if present in the flat index
+    if 'Total' in df_fuel.index:
+        df_fuel = df_fuel.drop('Total', errors='ignore')
+    if 'Total' in df_start.index:
+        df_start = df_start.drop('Total', errors='ignore')
+
+    # Convert dataframes to dictionaries for fast lookup by generator name
+    fuel_dict = df_fuel.to_dict(orient='index')
+    start_dict = df_start.to_dict(orient='index')
+
+    month_cols = list(unique_months)
+    combined_rows = []
+    col_names = [''] + month_cols
+
+    # Loop through each generator present in the Fuel Offtake dataset
+    for gen_name in fuel_dict.keys():
+        primary_vals = pd.Series(fuel_dict[gen_name]).reindex(month_cols, fill_value=0)
+        startup_vals = pd.Series(start_dict.get(gen_name, {})) \
+                       .reindex(month_cols, fill_value=0) if gen_name in start_dict else pd.Series(0, index=month_cols)
+        
+        secondary_vals = pd.Series(0, index=month_cols)
+        topping_vals = pd.Series(0, index=month_cols)
+
+        # Parent total is primary + startup (since secondary and topping are 0)
+        parent_total = primary_vals + startup_vals
+
+        # Construct rows matching your required format
+        row_parent = [gen_name] + list(parent_total.values)
+        row_prim   = ["        (Primary)"] + list(primary_vals.values)
+        row_sec    = ["        (Secondary)"] + list(secondary_vals.values)
+        row_start  = ["        (Startup)"] + list(startup_vals.values)
+        row_top    = ["        (Topping)"] + list(topping_vals.values)
+
+        block_df = pd.DataFrame([row_parent, row_prim, row_sec, row_start, row_top], columns=col_names)
+        
+        # Format matching your standard block output (Header row + Data + Spacer)
+        header_vals = pd.DataFrame([col_names], columns=col_names)
+        df_final = pd.concat([header_vals, block_df], ignore_index=True)
+        
+        spacer_df = pd.DataFrame([[''] * len(col_names)], columns=col_names)
+        
+        combined_rows.extend([df_final, spacer_df])
+
+    return pd.concat(combined_rows, ignore_index=True) if combined_rows else pd.DataFrame()

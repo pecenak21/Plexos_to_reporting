@@ -49,7 +49,7 @@ def get_automatic_scale_factor(base_dir, property_name, df_units, explicit_unit)
         print(f"    / Unit: No rule for '{db_unit}' > '{target_unit}'")
         return 1.0, True
 
-def pull_pivoted_data(base_dir, property_name, unique_months, category_list=None, class_name=None, emission_gas_name=None, is_rate=False, temporal_pattern="monthly", timeslice_name="All Periods"):
+def pull_pivoted_data(base_dir, property_name, unique_months, category_list=None, class_name=None, parent_name=None, is_rate=False, temporal_pattern="monthly", timeslice_name="All Periods"):
     """
     Executes a high-performance database PIVOT with case-insensitive and trailing-whitespace tolerant filters.
     
@@ -59,7 +59,7 @@ def pull_pivoted_data(base_dir, property_name, unique_months, category_list=None
         unique_months (list): A list of expected time columns (e.g., ['Jan-2026', 'Feb-2026']) to ensure consistent schema.
         category_list (list/str, optional): A specific category or list of categories to filter by. Defaults to None.
         class_name (str, optional): The class of objects to filter for (e.g., 'Buildings'). Defaults to None.
-        emission_gas_name (str, optional): If provided, overrides settings to focus on gas-specific production data. Defaults to None.
+        parent_name (str, optional): If provided, overrides settings to focus on nested data
         temporal_pattern (str, optional): Defines the aggregation level. Defaults to "monthly"; can be set to "daily".
         timeslice_name (str,optional): which timeslice to pull the data from
     """
@@ -90,12 +90,11 @@ def pull_pivoted_data(base_dir, property_name, unique_months, category_list=None
     
     master_filter = " AND ".join(sub_conditions)
     
-    # Override filters if specifically looking for emission gas data
-    if emission_gas_name:
-        master_filter = f"LOWER(TRIM(f.PropertyName)) = 'generation production'"
-        gas_filter = f"AND LOWER(TRIM(f.parentObjectName)) = '{emission_gas_name.lower().strip()}'"
+    # Override filters if specifically looking for nested
+    if parent_name:
+        parent_filter = f"AND LOWER(TRIM(f.parentObjectName)) = '{parent_name.lower().strip()}'"
     else:
-        gas_filter = ""
+        parent_filter = ""
 
     # 3. Configure Temporal Granularity: Set SQL logic for daily vs monthly aggregation
     if temporal_pattern == "daily":
@@ -122,7 +121,7 @@ def pull_pivoted_data(base_dir, property_name, unique_months, category_list=None
             JOIN mem_fki f ON d.SeriesId = f.seriesId AND d.DataFileId = f.dataFileId
             JOIN mem_period p ON d.PeriodId = p.PeriodId
             WHERE {master_filter}
-              {gas_filter}
+              {parent_filter}
         )
         ON Month_Label
         USING {agg_func}(Metric_Value)
