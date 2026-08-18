@@ -3,33 +3,67 @@ import shutil
 import subprocess
 from pathlib import Path
 
-def find_plexos_cli():
-    # 1. Check system PATH
+import os
+import shutil
+from pathlib import Path
+
+def find_plexos_cli(cli_path=""):
+    # 1. Check user-provided cli_path first
+    if cli_path:
+        provided_path = Path(cli_path)
+
+        # Handle exact executable path
+        if provided_path.is_file() and provided_path.name.lower() in [
+            "plexos-cloud.exe",
+            "plexos-cloud",
+        ]:
+            print(f"[+] Found CLI at user-specified path: {provided_path}")
+            return str(provided_path)
+
+        # Handle directory path where the executable might live
+        if provided_path.is_dir():
+            matches = list(provided_path.rglob("plexos-cloud.exe")) + list(
+                provided_path.rglob("plexos-cloud")
+            )
+            if matches:
+                print(
+                    f"[+] Found CLI in user-specified directory: {matches[0]}"
+                )
+                return str(matches[0])
+
+        print(
+            f"[-] Provided path '{cli_path}' was invalid or did not contain 'plexos-cloud'. "
+            "Switching to standard search locations..."
+        )
+
+    # 2. Check system PATH
     cli_match = shutil.which("plexos-cloud")
     if cli_match:
+        print(f"[+] Found CLI in system PATH at: {cli_match}")
         return cli_match
-        
-    # 2. Define standard fallback paths
+
+    # 3. Define standard fallback paths
     search_dirs = [
-        Path(os.environ.get("ProgramFiles", "C:\\Program Files")) / "Energy Exemplar",
-        Path(os.environ.get("ProgramFiles(x86)", "C:\\Program Files (x86)")) / "Energy Exemplar",
-        Path(os.environ.get("LocalAppData", "")) / "Programs" / "Energy Exemplar"
+        Path(os.environ.get("ProgramFiles", "C:\\Program Files"))
+        / "Energy Exemplar",
+        Path(os.environ.get("ProgramFiles(x86)", "C:\\Program Files (x86)"))
+        / "Energy Exemplar",
+        Path(os.environ.get("LocalAppData", "")) / "Programs" / "Energy Exemplar",
     ]
-    
-    print(f"[?] Searching for 'plexos-cloud' in: {search_dirs}")
-    
+
+    print(f"[?] Searching for 'plexos-cloud' in standard directories: {search_dirs}")
+
     for base_dir in search_dirs:
         if base_dir.exists():
-            # Search for the executable
             matches = list(base_dir.rglob("plexos-cloud.exe"))
             if matches:
                 print(f"[+] Found CLI at: {matches[0]}")
                 return str(matches[0])
-    
+
     print("[-] Could not find 'plexos-cloud.exe' in standard locations.")
     return None
 
-def convert_zip_to_parquet(zip_file_path, output_dir=None, overwrite=False):
+def convert_zip_to_parquet(zip_file_path, cli_path="", output_dir=None, overwrite=False):
     """
     Converts PLEXOS .zip to parquet.
     
@@ -57,7 +91,7 @@ def convert_zip_to_parquet(zip_file_path, output_dir=None, overwrite=False):
             return output_dir
             
     # Locate CLI
-    plexos_cli_path = find_plexos_cli()
+    plexos_cli_path = find_plexos_cli(cli_path=cli_path)
     if not plexos_cli_path:
         print("[-] Error: 'plexos-cloud' CLI not found.")
         return None

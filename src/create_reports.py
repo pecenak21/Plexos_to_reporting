@@ -45,6 +45,7 @@ def load_excel_config(config_path):
     df_summary = pd.read_excel(xl, 'Summary', index_col=0)
     input_path = df_summary.loc['InputPath', 'Value']
     script_path = df_summary.loc['ScriptPath', 'Value']
+    cli_path = df_summary.loc['CLI_Path', 'Value']
     script_path = script_path.split('src')[0]
     base_output_path = df_summary.loc['OutputPath', 'Value']
     overwrite_yn = df_summary.loc['Overwrite_Parquet', 'Value']
@@ -59,7 +60,7 @@ def load_excel_config(config_path):
     df_map = pd.read_excel(xl, 'Generator_name_map')
     asset_mapping = dict(zip(df_map['Resources_Plexos'], df_map['Resources_RTSim']))
     
-    return blueprint, blueprint_rat, asset_groups, input_path, base_output_path, df_units, overwrite_yn, integration_test_yn, script_path, asset_mapping
+    return blueprint, blueprint_rat, asset_groups, input_path, cli_path, base_output_path, df_units, overwrite_yn, integration_test_yn, script_path, asset_mapping
 
 
 def execute_standard_report(parquet_base_dir, blueprint, asset_groups, output_path, years, unique_months, df_units, asset_mapping):
@@ -189,9 +190,9 @@ def execute_timeslice_report(parquet_base_dir, blueprint_rat, asset_groups, outp
 
 def execute_pipeline(config_path):
     print(f"[+] Initializing report generation from: {config_path}")
-    blueprint, blueprint_rat, asset_groups, input_path, dir_name, df_units, overwrite, run_testing, script_path, asset_mapping = load_excel_config(config_path)
+    blueprint, blueprint_rat, asset_groups, input_path, cli_path, dir_name, df_units, overwrite, run_testing, script_path, asset_mapping = load_excel_config(config_path)
 
-    parquet_base_dir = convert_zip_to_parquet(input_path, overwrite=overwrite)
+    parquet_base_dir = convert_zip_to_parquet(input_path, cli_path=cli_path, overwrite=overwrite)
     if parquet_base_dir is None: return
     
     base_dir_clean = str(parquet_base_dir).replace('\\', '/')
