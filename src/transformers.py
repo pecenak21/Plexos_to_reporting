@@ -5,6 +5,7 @@ Processes pivoted queries into standardized matrix visuals, handling flat, bande
 import pandas as pd
 import numpy as np
 import duckdb
+import csv
 
 # Note: Ensure BAND_MAP and BANDS_ORDERED are imported or defined as per your project
 from database import pull_pivoted_data, get_automatic_scale_factor
@@ -83,13 +84,7 @@ def process_daily_block(parquet_base_dir, property_name, years, unique_months, c
     for asset, group in df_work.groupby(['Object_Name']):
         sub_table = group.set_index('Day_Id')[sorted_cols]
         
-        # Prepare data: header row + data
-        header_vals = pd.DataFrame([sorted_cols], columns=sorted_cols)
-        data_vals = sub_table.reset_index()
-        
-        # Combine and FORCE column order
-        df_final = pd.concat([header_vals, data_vals], ignore_index=True)
-        df_final = df_final[sorted_cols + ['Day_Id']] 
+        df_final = sub_table.reset_index()[sorted_cols + ['Day_Id']]
         
          # Modify index
         new_index = df_final.index.tolist()
@@ -287,22 +282,16 @@ def process_nested_block(parquet_base_dir, property_name, parent_name, child_nam
         df_data = process_flat_block(parquet_base_dir, property_name, header_name, years, unique_months, df_units, category_list=None, class_name=None, is_rate=is_rate, temporal_pattern=temporal_pattern, timeslice_name="All Periods", explicit_unit=explicit_unit, asset_mapping=asset_mapping, parent_name=parent)
         
         if not df_data.empty:
-            # 1. Reset the index so the gas names become an actual data column instead of a hidden index
             df_data = df_data.reset_index()
 
-            # 2. Create the header row 
-            header_vals = pd.DataFrame([df_data.columns], columns=df_data.columns)
-            df_final = pd.concat([header_vals, df_data], ignore_index=True)
-
-            # 3. Build the subheader row matching the width of the dataframe
-            subheader_data = [sub_header] + [''] * (len(df_data.columns) - 1)
+            subheader_data = [sub_header] + [np.nan] * (len(df_data.columns) - 1)
             subheader_row = pd.DataFrame([subheader_data], columns=df_data.columns)
-            
-            # 4. Spacer row
-            spacer_data = [''] * len(df_data.columns)
+
+            spacer_data = [np.nan] * len(df_data.columns)
             spacer_df = pd.DataFrame([spacer_data], columns=df_data.columns)
-            
-            combined_rows.extend([subheader_row, df_final, spacer_df])
+
+            # Append subheader, pure numeric data, and spacer
+            combined_rows.extend([subheader_row, df_data, spacer_df])
             
     # Return everything with a clean sequential index that you can completely drop on export
     return pd.concat(combined_rows, ignore_index=True) if combined_rows else pd.DataFrame()
@@ -378,3 +367,42 @@ def process_3_block(parquet_base_dir, parent_name, child_name, header_name, year
         combined_rows.extend([df_final, spacer_df])
 
     return pd.concat(combined_rows, ignore_index=True) if combined_rows else pd.DataFrame()
+
+def export_block_to_csv(file_handle, header_title, df_block):
+    """
+    Writes section titles, column headers, and pure numeric data directly 
+    to a CSV file without turning floats into string objects.
+    """
+    writer = csv.writer(file_handle)
+    
+    # 1. Write Section Header (e.g., "( 1 ) System Summary")
+    if header_title:
+        writer.writerow([header_title])
+    
+    if not df_block.empty:
+        # 2. Write Column Headers (e.g., Object_Name, Jan-26, Feb-26, ...)
+        if isinstance(df_block.index, pd.MultiIndex):
+            headers = list(df_block.index.names) + list(df_block.columns)
+        else:
+            headers = [(df_block.index.name or '')] + list(df_block.columns)
+            
+        writer.writerow(headers)
+        
+        # 3. Write Data Rows
+        for idx, row in df_block.iterrows():
+            idx_vals = list(idx) if isinstance(idx, tuple) else [idx]
+            
+            # Convert values: blank for NaN, float for numbers, string for labels
+            formatted_values = []
+            for v in row:
+                if pd.isna(v):
+                    formatted_values.append("")
+                elif isinstance(v, (int, float, np.number)):
+                    formatted_values.append(float(v)) # Output as unquoted number
+                else:
+                    formatted_values.append(str(v))
+            
+            writer.writerow(idx_vals + formatted_values)
+            
+    # 4. Write blank row spacer between sections
+    writer.writerow([])

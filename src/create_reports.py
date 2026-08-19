@@ -4,7 +4,7 @@ import pandas as pd
 import duckdb
 from collections import defaultdict
 from convert_zip_to_parquet import convert_zip_to_parquet
-from transformers import (process_flat_block, process_daily_block, process_nested_block, process_ratings_block, process_3_block)
+from transformers import (export_block_to_csv, process_flat_block, process_daily_block, process_nested_block, process_ratings_block, process_3_block)
 from standard_integration_testing import run_sit_validation
 
 def load_excel_config(config_path):
@@ -135,10 +135,8 @@ def execute_standard_report(parquet_base_dir, blueprint, asset_groups, output_pa
 
     print(f"[+] Writing standard report to: {output_path}")
     with open(output_path, 'w', newline='', encoding='utf-8') as f:
-        for header, df_block, idx_flag, header_flag in compiled_sections:
-            f.write(f"{header}\n")
-            df_block.to_csv(f, index=idx_flag, header=header_flag, lineterminator='\n')
-            f.write("\n\n")
+        for header, df_block, _, _ in compiled_sections:
+            export_block_to_csv(f, header_title=header, df_block=df_block)
 
 
 def execute_timeslice_report(parquet_base_dir, blueprint_rat, asset_groups, output_path, years, unique_months, df_units, asset_mapping=None):
@@ -181,12 +179,8 @@ def execute_timeslice_report(parquet_base_dir, blueprint_rat, asset_groups, outp
 
     print(f"[+] Writing Timeslice report to: {output_path}")
     with open(output_path, 'w', newline='', encoding='utf-8') as f:
-        for title, df_block, idx_flag, header_flag in compiled_sections:
-            if title:
-                f.write(f"{title}\n")
-            if not df_block.empty:
-                df_block.to_csv(f, index=idx_flag, header=header_flag, lineterminator='\n')
-            f.write("\n")
+        for title, df_block, _, _ in compiled_sections:
+            export_block_to_csv(f, header_title=title, df_block=df_block)
 
 def execute_pipeline(config_path):
     print(f"[+] Initializing report generation from: {config_path}")
@@ -214,7 +208,6 @@ def execute_pipeline(config_path):
     
     # Execute Standard Report if blueprint is provided
     if blueprint:
-        
         std_output_path = os.path.join(dir_name, "Standard_Report.csv")
         execute_standard_report(parquet_base_dir, blueprint, asset_groups, std_output_path, years, unique_months, df_units, asset_mapping)
         
