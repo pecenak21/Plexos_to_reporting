@@ -397,10 +397,12 @@ def export_block_to_csv(file_handle, header_title, df_block):
             for v in row:
                 if pd.isna(v):
                     formatted_values.append("")
-                elif isinstance(v, (int, float, np.number)):
-                    formatted_values.append(float(v)) # Output as unquoted number
                 else:
-                    formatted_values.append(str(v))
+                    num_val = pd.to_numeric(v, errors='ignore')
+                    if isinstance(num_val, (int, float, np.number)):
+                        formatted_values.append(round(float(num_val),4))
+                    else:
+                        formatted_values.append(str(v))
             
             writer.writerow(idx_vals + formatted_values)
             
