@@ -4,34 +4,53 @@ Features case-insensitive, whitespace-tolerant, and None-safe SQL queries over l
 """
 import os
 import re
+import functools
 import duckdb
 import pandas as pd
 
+# Set once the temp tables/view exist for the current DuckDB session, so repeated
+# calls skip the "does mem_fki already exist" round-trip (initialize_database_structures
+# is invoked on every pull_pivoted_data / get_automatic_scale_factor call).
+_db_initialized = False
+
 def initialize_database_structures(base_dir):
+    global _db_initialized
+    if _db_initialized:
+        return
     try:
         duckdb.query("SELECT 1 FROM mem_fki LIMIT 1")
+        _db_initialized = True
     except duckdb.CatalogException:
         print("[+] Building high-performance metadata cache...")
         base_dir_clean = str(base_dir).replace('\\', '/')
-        
+
         data_path = f"{base_dir_clean}/data/**/*.parquet"
         fki_path = f"{base_dir_clean}/fullkeyinfo/**/*.parquet"
         period_path = f"{base_dir_clean}/period/**/*.parquet"
-        
+
         duckdb.query(f"CREATE TEMPORARY TABLE mem_fki AS SELECT * FROM read_parquet('{fki_path}')")
         duckdb.query(f"CREATE TEMPORARY TABLE mem_period AS SELECT * FROM read_parquet('{period_path}')")
         duckdb.query(f"CREATE VIEW v_data AS SELECT * FROM read_parquet('{data_path}')")
+        _db_initialized = True
+
+
+@functools.lru_cache(maxsize=None)
+def _lookup_db_unit(base_dir, lookup_prop_lower):
+    # mem_fki is static for the lifetime of a report run, so the same
+    # (base_dir, property) pair always resolves to the same unit -- and this
+    # gets called once per property per parent object in nested blocks.
+    query = f"SELECT unitValue FROM mem_fki WHERE LOWER(TRIM(propertyName)) = '{lookup_prop_lower}' LIMIT 1;"
+    row = duckdb.query(query).fetchone()
+    return row[0].strip() if row else ""
 
 
 def get_automatic_scale_factor(base_dir, property_name, df_units, explicit_unit):
     initialize_database_structures(base_dir)
     lookup_prop = property_name[0] if isinstance(property_name, list) else property_name
-    
+
     # Get DB Unit
-    query = f"SELECT unitValue FROM mem_fki WHERE LOWER(TRIM(propertyName)) = '{lookup_prop.lower().strip()}' LIMIT 1;"
-    row = duckdb.query(query).fetchone()
-    db_unit = row[0].strip() if row else ""
-    
+    db_unit = _lookup_db_unit(base_dir, lookup_prop.lower().strip())
+
     # Target Unit is now strictly the explicit unit passed from the blueprint
     target_unit = str(explicit_unit).strip() if explicit_unit and str(explicit_unit).strip().lower() != 'nan' else ""
 
@@ -60,7 +79,8 @@ def pull_pivoted_data(base_dir, property_name, unique_months, category_list=None
         category_list (list/str, optional): A specific category or list of categories to filter by. Defaults to None.
         class_name (str, optional): The class of objects to filter for (e.g., 'Buildings'). Defaults to None.
         parent_name (str, optional): If provided, overrides settings to focus on nested data
-        temporal_pattern (str, optional): Defines the aggregation level. Defaults to "monthly"; can be set to "daily".
+        temporal_pattern (str, optional): Defines the aggregation level. Defaults to "monthly"; can be set to
+            "monthly-summary", "daily", or "daily-summary" ("daily" and "daily-summary" both pull day-level granularity).
         timeslice_name (str,optional): which timeslice to pull the data from
     """
 
@@ -97,7 +117,7 @@ def pull_pivoted_data(base_dir, property_name, unique_months, category_list=None
         parent_filter = ""
 
     # 3. Configure Temporal Granularity: Set SQL logic for daily vs monthly aggregation
-    if temporal_pattern == "daily":
+    if temporal_pattern in ("daily", "daily-summary"):
         day_select = "CAST(EXTRACT(DAY FROM CAST(p.StartDate AS TIMESTAMP)) AS INTEGER) AS Day_Id,"
         group_by_clause = "GROUP BY Object_Name, band_id, Year, Day_Id"
     else:

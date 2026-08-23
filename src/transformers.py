@@ -6,19 +6,28 @@ import pandas as pd
 import numpy as np
 import duckdb
 import csv
+import functools
 
 # Note: Ensure BAND_MAP and BANDS_ORDERED are imported or defined as per your project
 from database import pull_pivoted_data, get_automatic_scale_factor
+
+
+@functools.lru_cache(maxsize=None)
+def _cached_parent_query(parent_query):
+    # Multiple properties in the same blueprint section frequently share the same
+    # nested class/category, which produces the exact same "distinct parents" query
+    # in process_nested_block/process_32_block. Cache it instead of re-hitting DuckDB.
+    return duckdb.query(parent_query).df()
 
 def process_daily_block(parquet_base_dir, property_name, years, unique_months, class_name=None, is_rate=False, temporal_pattern="daily", asset_mapping=None):
     
     # 1. Pull the pivoted data
     df_pivoted = pull_pivoted_data(
-        base_dir=parquet_base_dir, 
-        class_name=class_name, 
-        unique_months=unique_months, 
+        base_dir=parquet_base_dir,
+        class_name=class_name,
+        unique_months=unique_months,
         property_name=property_name,
-        is_rate=False,
+        is_rate=is_rate,
         temporal_pattern=temporal_pattern
     )
     
@@ -57,14 +66,20 @@ def process_daily_block(parquet_base_dir, property_name, years, unique_months, c
     month_cols = [c for c in df_dense.columns if c not in ['Object_Name', 'band_id', 'Year', 'Day_Id']]
     df_dense = df_dense.groupby(['Object_Name', 'band_id', 'Day_Id'])[month_cols].sum().reset_index()
 
-    # 4. Calculate Totals
+    # 4. Calculate Totals (sum, or average across periods if this is a rate property)
     df_work = df_dense.copy()
     for yr in years:
         yr_months = [m for m in unique_months if f"-{yr}" in m]
-        df_work[f"Tot-{yr}"] = df_work[yr_months].sum(axis=1)
-    
+        if is_rate:
+            df_work[f"Tot-{yr}"] = df_work[yr_months].replace(0, np.nan).mean(axis=1).fillna(0)
+        else:
+            df_work[f"Tot-{yr}"] = df_work[yr_months].sum(axis=1)
+
     total_cols = [c for c in df_work.columns if c.startswith('Tot-')]
-    df_work['Total'] = df_work[total_cols].sum(axis=1)
+    if is_rate:
+        df_work['Total'] = df_work[total_cols].replace(0, np.nan).mean(axis=1).fillna(0)
+    else:
+        df_work['Total'] = df_work[total_cols].sum(axis=1)
     
     # 5. Define sorting logic and columns
     final_report_cols = [c for c in df_work.columns if c not in ['Object_Name', 'band_id', 'Day_Id']]
@@ -78,7 +93,40 @@ def process_daily_block(parquet_base_dir, property_name, years, unique_months, c
         return pd.to_datetime(x, format='%b-%Y')
 
     sorted_cols = sorted(final_report_cols, key=sort_key)
-    
+
+    # 6a. "daily-summary": collapse all children in the class into one daily total
+    # (sum across children, or average across children if this is a rate property),
+    # matching the cross-object collapse that "monthly-summary" does in process_flat_block.
+    if temporal_pattern == "daily-summary":
+        by_day = df_work[['Day_Id'] + sorted_cols]
+        if is_rate:
+            collapsed = by_day.replace(0, np.nan).groupby('Day_Id')[sorted_cols].mean().fillna(0)
+        else:
+            collapsed = by_day.groupby('Day_Id')[sorted_cols].sum()
+        collapsed = collapsed.reindex(range(1, 32), fill_value=0.0)
+
+        df_final = collapsed.reset_index()[sorted_cols + ['Day_Id']]
+
+        new_index = df_final.index.tolist()
+        new_index[0] = " "
+        df_final.index = new_index
+
+        label = f"{class_name}-{property_name}-Total" if class_name else f"{property_name}-Total"
+        header_row = pd.DataFrame(
+            [[np.nan] * (len(sorted_cols) + 1)],
+            index=[label],
+            columns=sorted_cols + ['Day_Id']
+        ).fillna("")
+
+        spacer = pd.DataFrame(
+            [[np.nan] * (len(sorted_cols) + 1)],
+            index=[''],
+            columns=sorted_cols + ['Day_Id']
+        ).fillna("")
+
+        block = pd.concat([header_row, df_final], axis=0)
+        return pd.concat([block, spacer], axis=0)
+
     # 6. Format into "Sub-table" structure
     all_chunks = []
     for asset, group in df_work.groupby(['Object_Name']):
@@ -148,13 +196,9 @@ def process_flat_block(parquet_base_dir, property_name, header_name, years, uniq
 
     df_pivoted = pull_pivoted_data(parquet_base_dir, property_name, unique_months, category_list=category_list, class_name=class_name, is_rate=is_rate, timeslice_name=timeslice_name, parent_name=parent_name)
 
-    if df_pivoted.empty: 
+    if df_pivoted.empty:
         print(f"[DEBUG] ---> Result was EMPTY for property '{property_name}' under parent '{parent_name}'.")
         return pd.DataFrame()
-    
-    df_pivoted = pull_pivoted_data(parquet_base_dir, property_name, unique_months, category_list=category_list, class_name=class_name, is_rate=is_rate, timeslice_name=timeslice_name, parent_name=parent_name)
-
-    if df_pivoted.empty: return pd.DataFrame()
 
     # Code to map the names to provided RTsim names
     if asset_mapping:
@@ -256,12 +300,12 @@ def process_nested_block(parquet_base_dir, property_name, parent_name, child_nam
 
     if valid_cats:
         placeholders = str(tuple(valid_cats)) if len(valid_cats) > 1 else f"('{valid_cats[0]}')"
-        parent_query = f""" SELECT DISTINCT ParentObjectName FROM mem_fki WHERE ParentClassName = '{parent_name}' AND ParentObjectCategoryName IN {placeholders}"""
+        parent_query = f""" SELECT DISTINCT ParentObjectName FROM mem_fki WHERE ParentClassName = '{parent_name}' AND ParentObjectCategoryName IN {placeholders} ORDER BY ParentObjectName"""
     else:
-        parent_query = f"""SELECT DISTINCT ParentObjectName FROM mem_fki WHERE ParentClassName = '{parent_name}'"""
+        parent_query = f"""SELECT DISTINCT ParentObjectName FROM mem_fki WHERE ParentClassName = '{parent_name}' ORDER BY ParentObjectName"""
 
-    result = duckdb.query(parent_query).df()
-    
+    result = _cached_parent_query(parent_query)
+
     # 2. Defensive check
     if result.empty or 'ParentObjectName' not in result.columns:
         print(f"Warning: Data not found in mem_fki. Columns found: {result.columns.tolist()}")
@@ -319,11 +363,11 @@ def process_32_block(parquet_base_dir, property_name, parent_name, child_name, h
 
     if valid_cats:
         placeholders = str(tuple(valid_cats)) if len(valid_cats) > 1 else f"('{valid_cats[0]}')"
-        parent_query = f"""SELECT DISTINCT ParentObjectName FROM mem_fki WHERE ParentClassName = '{parent_name}' AND ParentObjectCategoryName IN {placeholders}"""
+        parent_query = f"""SELECT DISTINCT ParentObjectName FROM mem_fki WHERE ParentClassName = '{parent_name}' AND ParentObjectCategoryName IN {placeholders} ORDER BY ParentObjectName"""
     else:
-        parent_query = f"""SELECT DISTINCT ParentObjectName FROM mem_fki WHERE ParentClassName = '{parent_name}'"""
+        parent_query = f"""SELECT DISTINCT ParentObjectName FROM mem_fki WHERE ParentClassName = '{parent_name}' ORDER BY ParentObjectName"""
 
-    result = duckdb.query(parent_query).df()
+    result = _cached_parent_query(parent_query)
 
     if result.empty or 'ParentObjectName' not in result.columns:
         print(f"Warning: Data not found in mem_fki. Columns found: {result.columns.tolist()}")
@@ -461,11 +505,14 @@ def export_block_to_csv(file_handle, header_title, df_block, include_index=True,
                 # Catch actual NaNs AND string representations of 'nan' / empty values
                 if pd.isna(v) or str(v).strip().lower() in ['nan', 'none', 'null', '']:
                     formatted_values.append("")
+                elif isinstance(v, (int, float, np.number)):
+                    # Already numeric -- skip pd.to_numeric's (deprecated, warning-stack-costly)
+                    # errors='ignore' path entirely; this is the common case for data cells.
+                    formatted_values.append(round(float(v), 4))
                 else:
-                    num_val = pd.to_numeric(v, errors='ignore')
-                    if isinstance(num_val, (int, float, np.number)):
-                        formatted_values.append(round(float(num_val), 4))
-                    else:
+                    try:
+                        formatted_values.append(round(float(v), 4))
+                    except (TypeError, ValueError):
                         formatted_values.append(str(v))
             
             writer.writerow(idx_vals + formatted_values)

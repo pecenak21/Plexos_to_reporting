@@ -114,7 +114,7 @@ def execute_standard_report(parquet_base_dir, blueprint, asset_groups, output_pa
                 )
                 idx_flag, header_flag = False, False
 
-            elif temp_pattern == "daily":
+            elif temp_pattern in ("daily", "daily-summary"):
                 df_block = process_daily_block(parquet_base_dir, prop_input, years, unique_months, class_name=c_in, is_rate=is_rate, temporal_pattern=temp_pattern, asset_mapping=asset_mapping)
                 idx_flag, header_flag = True, False
             else:
