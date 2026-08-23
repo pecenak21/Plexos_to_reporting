@@ -287,13 +287,69 @@ def process_nested_block(parquet_base_dir, property_name, parent_name, child_nam
             subheader_data = [sub_header] + [np.nan] * (len(df_data.columns) - 1)
             subheader_row = pd.DataFrame([subheader_data], columns=df_data.columns)
 
+            # Bake the date/column header in for this nested item so every
+            # sub-block carries its own header row, not just the section as a whole
+            header_vals = pd.DataFrame([df_data.columns], columns=df_data.columns)
+
             spacer_data = [np.nan] * len(df_data.columns)
             spacer_df = pd.DataFrame([spacer_data], columns=df_data.columns)
 
-            # Append subheader, pure numeric data, and spacer
-            combined_rows.extend([subheader_row, df_data, spacer_df])
+            # Append subheader, date header, pure numeric data, and spacer
+            combined_rows.extend([subheader_row, header_vals, df_data, spacer_df])
             
     # Return everything with a clean sequential index that you can completely drop on export
+    return pd.concat(combined_rows, ignore_index=True) if combined_rows else pd.DataFrame()
+
+
+# bespoke code for effluents summary -- see note in create_reports.py where this is dispatched
+def process_32_block(parquet_base_dir, property_name, parent_name, child_name, header_name, years, unique_months, df_units, category_list=None, class_name=None, is_rate=False, temporal_pattern="monthly-summary", timeslice_name="All Periods", explicit_unit=None, asset_mapping=None):
+    """
+    Custom block generator for '( 32 ) Total Effluents by Type lbs'.
+
+    process_nested_block()/process_flat_block() were built to be generic, but the
+    "monthly-summary" path in process_flat_block() labels its single aggregated row
+    with a generated string like "None-all-Generation Production-Total". That label
+    is meaningless here (the pollutant name is already the sub-header for this block)
+    and RTSim's report has no row label at all under each pollutant -- just the
+    date header and one row of totals. Rather than keep bending the generic helpers
+    to hide that label, this is a bespoke block matching that exact layout.
+    """
+    cat_items = category_list if isinstance(category_list, list) else [category_list]
+    valid_cats = [str(cat).strip() for cat in cat_items if cat is not None and str(cat).lower().strip() != 'all']
+
+    if valid_cats:
+        placeholders = str(tuple(valid_cats)) if len(valid_cats) > 1 else f"('{valid_cats[0]}')"
+        parent_query = f"""SELECT DISTINCT ParentObjectName FROM mem_fki WHERE ParentClassName = '{parent_name}' AND ParentObjectCategoryName IN {placeholders}"""
+    else:
+        parent_query = f"""SELECT DISTINCT ParentObjectName FROM mem_fki WHERE ParentClassName = '{parent_name}'"""
+
+    result = duckdb.query(parent_query).df()
+
+    if result.empty or 'ParentObjectName' not in result.columns:
+        print(f"Warning: Data not found in mem_fki. Columns found: {result.columns.tolist()}")
+        return pd.DataFrame()
+
+    all_parents = result['ParentObjectName'].tolist()
+    mapped_parents = [asset_mapping.get(item, item) for item in all_parents]
+
+    combined_rows = []
+    for idx, parent in enumerate(all_parents):
+        sub_header = f"Total Effluents (lb) -- {mapped_parents[idx]}"
+
+        df_data = process_flat_block(parquet_base_dir, property_name, header_name, years, unique_months, df_units, category_list=None, class_name=None, is_rate=is_rate, temporal_pattern=temporal_pattern, timeslice_name="All Periods", explicit_unit=explicit_unit, asset_mapping=asset_mapping, parent_name=parent)
+
+        if not df_data.empty:
+            month_cols = list(df_data.columns)
+            col_names = [''] + month_cols
+
+            subheader_row = pd.DataFrame([[sub_header] + [np.nan] * len(month_cols)], columns=col_names)
+            header_vals = pd.DataFrame([col_names], columns=col_names)
+            # Drop the generated "class-cat-property-Total" row label -- blank leading cell only
+            data_row = pd.DataFrame([[''] + list(df_data.iloc[0].values)], columns=col_names)
+            spacer_df = pd.DataFrame([[np.nan] * len(col_names)], columns=col_names)
+
+            combined_rows.extend([subheader_row, header_vals, data_row, spacer_df])
+
     return pd.concat(combined_rows, ignore_index=True) if combined_rows else pd.DataFrame()
 
 
@@ -368,39 +424,47 @@ def process_3_block(parquet_base_dir, parent_name, child_name, header_name, year
 
     return pd.concat(combined_rows, ignore_index=True) if combined_rows else pd.DataFrame()
 
-def export_block_to_csv(file_handle, header_title, df_block):
+def export_block_to_csv(file_handle, header_title, df_block, include_index=True, include_header=True):
     """
     Writes section titles, column headers, and pure numeric data directly 
-    to a CSV file without turning floats into string objects.
+    to a CSV file while explicitly respecting index and header flags.
     """
     writer = csv.writer(file_handle)
     
-    # 1. Write Section Header (e.g., "( 1 ) System Summary")
+    # 1. Write Section Header (e.g., "( 3 ) Thermal Unit Fuel Use (MBTU)")
     if header_title:
         writer.writerow([header_title])
     
     if not df_block.empty:
-        # 2. Write Column Headers (e.g., Object_Name, Jan-26, Feb-26, ...)
-        if isinstance(df_block.index, pd.MultiIndex):
-            headers = list(df_block.index.names) + list(df_block.columns)
-        else:
-            headers = [(df_block.index.name or '')] + list(df_block.columns)
-            
-        writer.writerow(headers)
+        # 2. Write Column Headers (only if include_header=True)
+        if include_header:
+            if include_index:
+                if isinstance(df_block.index, pd.MultiIndex):
+                    headers = list(df_block.index.names) + list(df_block.columns)
+                else:
+                    headers = [(df_block.index.name or '')] + list(df_block.columns)
+            else:
+                headers = list(df_block.columns)
+                
+            writer.writerow(headers)
         
         # 3. Write Data Rows
         for idx, row in df_block.iterrows():
-            idx_vals = list(idx) if isinstance(idx, tuple) else [idx]
+            # Conditionally include index column(s)
+            if include_index:
+                idx_vals = list(idx) if isinstance(idx, tuple) else [idx]
+            else:
+                idx_vals = []
             
-            # Convert values: blank for NaN, float for numbers, string for labels
             formatted_values = []
             for v in row:
-                if pd.isna(v):
+                # Catch actual NaNs AND string representations of 'nan' / empty values
+                if pd.isna(v) or str(v).strip().lower() in ['nan', 'none', 'null', '']:
                     formatted_values.append("")
                 else:
                     num_val = pd.to_numeric(v, errors='ignore')
                     if isinstance(num_val, (int, float, np.number)):
-                        formatted_values.append(round(float(num_val),4))
+                        formatted_values.append(round(float(num_val), 4))
                     else:
                         formatted_values.append(str(v))
             

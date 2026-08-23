@@ -162,6 +162,13 @@ def run_sit_validation(baseline_dir, newreport_dir):
         tee.close()
 
 if __name__ == "__main__":
-    b_dir = r"C:/Users/pecen/Plexos_to_reporting/docs/Baseline Reports"
-    n_dir = r"C:/Users/pecen/Downloads/"
-    run_sit_validation(b_dir, n_dir)
+    from create_reports import load_excel_config
+
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    baseline_dir = os.path.join(repo_root, "docs", "Baseline Reports")
+
+    config_path = sys.argv[1] if len(sys.argv) > 1 else 'report_config.xlsx'
+    (blueprint, blueprint_rat, asset_groups, input_path, cli_path, base_output_path,
+     df_units, overwrite_yn, integration_test_yn, script_path, asset_mapping) = load_excel_config(config_path)
+
+    run_sit_validation(baseline_dir, base_output_path)

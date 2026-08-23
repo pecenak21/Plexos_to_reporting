@@ -4,7 +4,7 @@ import pandas as pd
 import duckdb
 from collections import defaultdict
 from convert_zip_to_parquet import convert_zip_to_parquet
-from transformers import (export_block_to_csv, process_flat_block, process_daily_block, process_nested_block, process_ratings_block, process_3_block)
+from transformers import (export_block_to_csv, process_flat_block, process_daily_block, process_nested_block, process_ratings_block, process_3_block, process_32_block)
 from standard_integration_testing import run_sit_validation
 
 def load_excel_config(config_path):
@@ -95,14 +95,25 @@ def execute_standard_report(parquet_base_dir, blueprint, asset_groups, output_pa
                 target_categories = asset_groups.get((parent_in, g_in), None)
             
             if header == "( 3 ) Thermal Unit Fuel Use (MBTU)":
-                print(f"HERE IS THE HEADER: {header}")
+                print(f"Note: Custom Code to match RTSim output")
                 df_block = process_3_block(
                     parquet_base_dir, parent_in, child_in, header, years, unique_months, 
                     df_units=df_units, category_list=target_categories, 
                     class_name=c_in, is_rate=is_rate, temporal_pattern=temp_pattern,
                     explicit_unit=unit_val, asset_mapping=asset_mapping
                 )
-                idx_flag, header_flag = False, True
+                idx_flag, header_flag = False, False
+
+            elif header == "( 32 ) Total Effluents by Type lbs":
+                print(f"Note: Custom Code to match RTSim output")
+                df_block = process_32_block(
+                    parquet_base_dir, prop_input, parent_in, child_in, header, years, unique_months,
+                    df_units=df_units, category_list=target_categories,
+                    class_name=c_in, is_rate=is_rate, temporal_pattern=temp_pattern,
+                    explicit_unit=unit_val, asset_mapping=asset_mapping
+                )
+                idx_flag, header_flag = False, False
+
             elif temp_pattern == "daily":
                 df_block = process_daily_block(parquet_base_dir, prop_input, years, unique_months, class_name=c_in, is_rate=is_rate, temporal_pattern=temp_pattern, asset_mapping=asset_mapping)
                 idx_flag, header_flag = True, False
@@ -114,7 +125,8 @@ def execute_standard_report(parquet_base_dir, blueprint, asset_groups, output_pa
                         class_name=c_in, is_rate=is_rate, temporal_pattern=temp_pattern,
                         explicit_unit=unit_val, asset_mapping=asset_mapping
                     )
-                    idx_flag, header_flag = False, True
+                    idx_flag, header_flag = False, False
+
                 else:
                     df_block = process_flat_block(
                         parquet_base_dir, prop_input, header, years, unique_months, 
@@ -135,9 +147,14 @@ def execute_standard_report(parquet_base_dir, blueprint, asset_groups, output_pa
 
     print(f"[+] Writing standard report to: {output_path}")
     with open(output_path, 'w', newline='', encoding='utf-8') as f:
-        for header, df_block, _, _ in compiled_sections:
-            export_block_to_csv(f, header_title=header, df_block=df_block)
-
+        for header, df_block, idx_flag, header_flag in compiled_sections:
+            export_block_to_csv(
+                f, 
+                header_title=header, 
+                df_block=df_block, 
+                include_index=idx_flag, 
+                include_header=header_flag
+            )
 
 def execute_timeslice_report(parquet_base_dir, blueprint_rat, asset_groups, output_path, years, unique_months, df_units, asset_mapping=None):
     print("[+] Building Timeslice Report...")
@@ -186,7 +203,9 @@ def execute_pipeline(config_path):
     print(f"[+] Initializing report generation from: {config_path}")
     blueprint, blueprint_rat, asset_groups, input_path, cli_path, dir_name, df_units, overwrite, run_testing, script_path, asset_mapping = load_excel_config(config_path)
 
-    parquet_base_dir = convert_zip_to_parquet(input_path, cli_path=cli_path, overwrite=overwrite)
+    parquet_path_out=os.path.join(dir_name, "Parquet Files")
+
+    parquet_base_dir = convert_zip_to_parquet(input_path, cli_path=cli_path, output_dir=parquet_path_out, overwrite=overwrite)
     if parquet_base_dir is None: return
     
     base_dir_clean = str(parquet_base_dir).replace('\\', '/')
