@@ -3,6 +3,7 @@ import numpy as np
 import os
 import io
 import sys
+from collections import Counter
 from datetime import datetime
 
 class TeeLogger:
@@ -59,7 +60,113 @@ def parse_report_into_sections(filepath):
         
     return sections
 
-def compare_report_files(golden_path, generated_path, report_name="Report", tolerance=2e-4):
+def _diff_section_headers(golden_sections, gen_sections):
+    """Check 1: the same set of section headers exists in both reports."""
+    golden_headers = set(golden_sections.keys())
+    gen_headers = set(gen_sections.keys())
+    missing_in_gen = sorted(golden_headers - gen_headers)
+    missing_in_gold = sorted(gen_headers - golden_headers)
+
+    if missing_in_gen:
+        print(f"  [-] {len(missing_in_gen)} section(s) in baseline but MISSING from generated report:")
+        for h in missing_in_gen:
+            print(f"        '{h}'")
+    if missing_in_gold:
+        print(f"  [-] {len(missing_in_gold)} section(s) in generated report but MISSING from baseline:")
+        for h in missing_in_gold:
+            print(f"        '{h}'")
+
+    common_headers = sorted(golden_headers & gen_headers)
+    return (not missing_in_gen and not missing_in_gold), common_headers
+
+
+def _diff_row_labels(header, df_gold, df_gen):
+    """Check 2: the row label (index) column matches between the two sections.
+
+    Compared as a multiset (via Counter) rather than a plain set so duplicate
+    labels -- which occur by design in nested/bespoke blocks that repeat
+    '(Primary)'/'(Secondary)' style sub-rows per generator -- are counted, not
+    just checked for presence (this also catches an accidentally-duplicated
+    row). Blank labels (spacer rows within nested blocks) carry no identifying
+    information and are excluded.
+    """
+    gold_labels = Counter(str(x) for x in df_gold.index if pd.notna(x) and str(x).strip() != '')
+    gen_labels = Counter(str(x) for x in df_gen.index if pd.notna(x) and str(x).strip() != '')
+
+    mismatches = [
+        (label, gold_labels.get(label, 0), gen_labels.get(label, 0))
+        for label in sorted(set(gold_labels) | set(gen_labels))
+        if gold_labels.get(label, 0) != gen_labels.get(label, 0)
+    ]
+
+    if mismatches:
+        print(f"  [!] Section '{header}' ROW LABEL MISMATCH ({len(mismatches)} label(s)):")
+        for label, gc, nc in mismatches:
+            if nc == 0:
+                print(f"        MISSING from generated: '{label}' (baseline has {gc}x)")
+            elif gc == 0:
+                print(f"        EXTRA in generated: '{label}' (not in baseline, found {nc}x)")
+            else:
+                print(f"        COUNT MISMATCH: '{label}' -- baseline={gc}x, generated={nc}x")
+
+    return not mismatches
+
+
+def _diff_data(header, df_gold, df_gen, tolerance, top_n_magnitude=3):
+    """Check 3: shape, then -- if shapes match -- a tolerance-gated, magnitude-ranked value diff."""
+    if df_gold.shape != df_gen.shape:
+        print(f"  [!] Section '{header}' DIMENSION MISMATCH:")
+        print(f"      Baseline shape: {df_gold.shape} | Generated shape: {df_gen.shape}")
+        return False
+
+    numeric_cols = df_gold.select_dtypes(include=[np.number]).columns
+    if len(numeric_cols) == 0:
+        print(f"  [ok] Section '{header}' structure verified.")
+        return True
+
+    # Align rows by label when both sides carry a unique, matching label set, so a row
+    # reorder (e.g. a query gaining an ORDER BY) doesn't masquerade as a data mismatch.
+    if df_gold.index.is_unique and df_gen.index.is_unique and set(df_gold.index) == set(df_gen.index):
+        df_gen = df_gen.reindex(df_gold.index)
+
+    try:
+        gold_vals = df_gold[numeric_cols].to_numpy(dtype=float)
+        gen_vals = df_gen[numeric_cols].to_numpy(dtype=float)
+    except Exception as e:
+        print(f"  [!] Error comparing data for section '{header}': {e}")
+        return False
+
+    close_mask = np.isclose(gold_vals, gen_vals, atol=tolerance, equal_nan=True)
+    if close_mask.all():
+        print(f"  [ok] Section '{header}' matched within tolerance.")
+        return True
+
+    # Rank mismatches by order-of-magnitude (how many multiples apart the two values are)
+    # rather than raw absolute difference -- a 10x/100x jump usually means a real bug
+    # (wrong unit conversion, wrong aggregation), and is far more diagnostic than a pile
+    # of rounding-level misses. Only the worst few are printed; the rest are just counted.
+    floor = 1e-9
+    mismatch_idx = np.argwhere(~close_mask)
+    scored = []
+    for r, c in mismatch_idx:
+        g, n = gold_vals[r, c], gen_vals[r, c]
+        abs_diff = abs(n - g)
+        magnitude = (max(abs(g), abs(n)) + floor) / (min(abs(g), abs(n)) + floor)
+        scored.append((magnitude, abs_diff, r, c, g, n))
+    scored.sort(key=lambda x: (-x[0], -x[1]))
+
+    print(f"  [!] Section '{header}': {len(scored)} of {gold_vals.size} cell(s) outside tolerance "
+          f"({tolerance}). Top {min(top_n_magnitude, len(scored))} by magnitude:")
+    for magnitude, abs_diff, r, c, g, n in scored[:top_n_magnitude]:
+        row_label = df_gold.index[r]
+        col_label = numeric_cols[c]
+        print(f"        Row '{row_label}', Col '{col_label}': baseline={g:.4f}, generated={n:.4f} "
+              f"(diff={abs_diff:.4f}, {magnitude:.1f}x)")
+
+    return False
+
+
+def compare_report_files(golden_path, generated_path, report_name="Report", tolerance=2e-4, top_n_magnitude=3):
     # Report values are rounded to 4 decimals on export (export_block_to_csv), but DuckDB's
     # parallel SUM aggregation is not bit-deterministic across runs of identical data -- summation
     # order noise on the order of 1e-10 can flip the last rounded digit (e.g. 0.5761 vs 0.5762).
@@ -68,52 +175,29 @@ def compare_report_files(golden_path, generated_path, report_name="Report", tole
     print(f"\n[+] Running SIT Semantic Diff for: {report_name}")
     print(f"    Baseline:  {golden_path}")
     print(f"    Generated: {generated_path}")
-    
+
     golden_sections = parse_report_into_sections(golden_path)
     gen_sections = parse_report_into_sections(generated_path)
-    
+
     if not golden_sections or not gen_sections:
         print(f"  [FAIL] Could not parse sections for {report_name}.")
         return False
-        
-    differences_found = False
-    all_headers = sorted(set(golden_sections.keys()).union(set(gen_sections.keys())))
-    
-    for header in all_headers:
-        if header not in golden_sections:
-            print(f"  [-] Section MISSING in generated report: '{header}'")
-            differences_found = True
-            continue
-        if header not in gen_sections:
-            print(f"  [-] Section MISSING in baseline: '{header}'")
-            differences_found = True
-            continue
-            
+
+    # 1. Section headers
+    headers_ok, common_headers = _diff_section_headers(golden_sections, gen_sections)
+    differences_found = not headers_ok
+
+    for header in common_headers:
         df_gold = golden_sections[header]
         df_gen = gen_sections[header]
-        
-        if df_gold.shape != df_gen.shape:
-            print(f"  [!] Section '{header}' DIMENSION MISMATCH:")
-            print(f"      Baseline shape: {df_gold.shape} | Generated shape: {df_gen.shape}")
-            differences_found = True
-            continue
-            
-        try:
-            numeric_cols = df_gold.select_dtypes(include=[np.number]).columns
-            if len(numeric_cols) > 0:
-                gold_vals = df_gold[numeric_cols].to_numpy(dtype=float)
-                gen_vals = df_gen[numeric_cols].to_numpy(dtype=float)
-                
-                close_mask = np.isclose(gold_vals, gen_vals, atol=tolerance, equal_nan=True)
-                if not close_mask.all():
-                    print(f"  [!] Section '{header}' has DATA MISMATCH in numeric values.")
-                    differences_found = True
-                else:
-                    print(f"  [ok] Section '{header}' matched within tolerance.")
-            else:
-                print(f"  [ok] Section '{header}' structure verified.")
-        except Exception as e:
-            print(f"  [!] Error comparing data for section '{header}': {e}")
+
+        # 2. Row labels
+        labels_ok = _diff_row_labels(header, df_gold, df_gen)
+
+        # 3. Shape, then magnitude-ranked value diff
+        data_ok = _diff_data(header, df_gold, df_gen, tolerance, top_n_magnitude)
+
+        if not (labels_ok and data_ok):
             differences_found = True
 
     if not differences_found:
