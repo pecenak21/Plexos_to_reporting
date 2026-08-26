@@ -1,0 +1,54 @@
+==================================================
+ Systems Integration Testing (SIT) Execution Log
+ Timestamp: 2026-08-26 18:39:59
+==================================================
+
+[+] Running SIT Semantic Diff for: Standard Report
+    Baseline:  C:\Users\pecen\Plexos_to_Reporting\/docs/Baseline Reports\Standard_Report.csv
+    Generated: C:\Users\pecen\AppData\Local\Temp\claude\C--Users-pecen-Plexos-to-reporting\14d79504-c27c-4df4-8012-8aec10813fcc\scratchpad\verify_output2\Standard_Report.csv
+  [ok] Section '( 1 ) System Summary' matched within tolerance.
+  [ok] Section '( 10 ) Thermal Unit Starts (-)' matched within tolerance.
+  [ok] Section '( 11 ) Thermal Unit Hours Online (Hours)' matched within tolerance.
+  [ok] Section '( 14 ) Thermal Unit Effluents lbs (lbs)' structure verified.
+  [ok] Section '( 2 ) Thermal Unit Generation (MWH)' matched within tolerance.
+  [ok] Section '( 21 ) Transaction Amount (MWH)' matched within tolerance.
+  [ok] Section '( 22 ) Transaction Revenues ($)' matched within tolerance.
+  [ok] Section '( 23 ) Contract Fuel Use (1000·MMBTU)' matched within tolerance.
+  [ok] Section '( 26 ) Contract Cost ($)' matched within tolerance.
+  [ok] Section '( 27 ) Contract Daily Use (tons)' matched within tolerance.
+  [ok] Section '( 28 ) Contract Daily Cost ($)' matched within tolerance.
+  [ok] Section '( 29 ) Shortfall and Spin violations' matched within tolerance.
+  [ok] Section '( 3 ) Thermal Unit Fuel Use (MBTU)' structure verified.
+  [ok] Section '( 30 ) Dump Energy and Hours' matched within tolerance.
+  [ok] Section '( 31 ) System Native Load' matched within tolerance.
+  [ok] Section '( 32 ) Total Effluents by Type lbs' structure verified.
+  [ok] Section '( 33c ) Hydro/Batt Discharge: Battery (MWH)' matched within tolerance.
+  [ok] Section '( 34c ) Hydro/Batt Charge: Battery (MWH)' matched within tolerance.
+  [ok] Section '( 37c ) Hydro/Batt Net Cost: Battery ($)' matched within tolerance.
+  [ok] Section '( 38c ) Hydro/Batt Oper Profit: Battery ($)' matched within tolerance.
+  [ok] Section '( 3a ) Thermal Unit Fuel Use (MBTU) - Starting' matched within tolerance.
+  [ok] Section '( 4 ) Thermal Unit Average Heatrate (MBTU/MWH)' matched within tolerance.
+  [ok] Section '( 5 ) Thermal Unit Total Cost ($)' matched within tolerance.
+  [ok] Section '( 56a ) Wind/Solar Generation: Wind (MWH)' matched within tolerance.
+  [ok] Section '( 57a ) Wind/Solar Total Cost: Wind ($)' matched within tolerance.
+  [ok] Section '( 6 ) Thermal Unit Fuel Cost ($)' matched within tolerance.
+  [ok] Section '( 7 ) Thermal Unit Startup Cost ($)' matched within tolerance.
+  [ok] Section '( 72 ) Thermal Unit Capacity Factor (-)' matched within tolerance.
+  [ok] Section '( 8 ) Thermal Unit Variable O&M Cost ($)' matched within tolerance.
+  [ok] Section '( 80 ) Thermal Comb Cycle CT Starts (-)' matched within tolerance.
+  [ok] Section '( 87 ) Comb Cycle Mode Hours Online (Hours)' matched within tolerance.
+  [ok] Section '( 9 ) Thermal Unit Fixed O&M Cost ($)' matched within tolerance.
+  [ok] Section '(100a) Wind/Solar Capacity Factor: Wind (-)' matched within tolerance.
+  [ok] Section '(102) Supplemental Dump Value ($)' matched within tolerance.
+  [PASS] Standard Report matches baseline perfectly.
+
+[+] Running SIT Semantic Diff for: Ratings Report
+    Baseline:  C:\Users\pecen\Plexos_to_Reporting\/docs/Baseline Reports\Ratings_Report.csv
+    Generated: C:\Users\pecen\AppData\Local\Temp\claude\C--Users-pecen-Plexos-to-reporting\14d79504-c27c-4df4-8012-8aec10813fcc\scratchpad\verify_output2\Ratings_Report.csv
+  [ok] Section 'All Periods' matched within tolerance.
+  [PASS] Ratings Report matches baseline perfectly.
+
+--------------------------------------------------
+[SUCCESS] All SIT validation checks passed successfully!
+--------------------------------------------------
+Log saved successfully to: C:\Users\pecen\Plexos_to_Reporting\/docs/Baseline Reports\SIT_Test_Results.log

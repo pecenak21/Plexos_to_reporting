@@ -59,7 +59,12 @@ def parse_report_into_sections(filepath):
         
     return sections
 
-def compare_report_files(golden_path, generated_path, report_name="Report", tolerance=1e-5):
+def compare_report_files(golden_path, generated_path, report_name="Report", tolerance=2e-4):
+    # Report values are rounded to 4 decimals on export (export_block_to_csv), but DuckDB's
+    # parallel SUM aggregation is not bit-deterministic across runs of identical data -- summation
+    # order noise on the order of 1e-10 can flip the last rounded digit (e.g. 0.5761 vs 0.5762).
+    # A tolerance tighter than the export rounding grid (1e-4) flags that noise as a mismatch, so
+    # this must stay looser than 1e-4 to avoid flaky failures unrelated to real data regressions.
     print(f"\n[+] Running SIT Semantic Diff for: {report_name}")
     print(f"    Baseline:  {golden_path}")
     print(f"    Generated: {generated_path}")
