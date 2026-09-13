@@ -8,6 +8,8 @@ import functools
 import duckdb
 import pandas as pd
 
+import exceptions_report
+
 # Set once the temp tables/view exist for the current DuckDB session, so repeated
 # calls skip the "does mem_fki already exist" round-trip (initialize_database_structures
 # is invoked on every pull_pivoted_data / get_automatic_scale_factor call).
@@ -63,9 +65,16 @@ def get_automatic_scale_factor(base_dir, property_name, df_units, explicit_unit)
     if not match.empty:
         factor = float(match.iloc[0]['ConversionRate'])
         print(f"    / Unit:  '{db_unit}' > '{target_unit}' | Factor Applied: {factor}")
+        if pd.isna(factor):
+            exceptions_report.record_nan_scale(lookup_prop, db_unit, target_unit)
         return factor, False
     else:
         print(f"    / Unit: No rule for '{db_unit}' > '{target_unit}'")
+        # Same unit on both sides (or no target requested) needs no rule -- only a genuine
+        # unit difference with no rule means the values silently stay in the wrong unit.
+        needs_conversion = target_unit and db_unit and db_unit.lower().strip() != target_unit.lower().strip()
+        if needs_conversion:
+            exceptions_report.record_unit_miss(lookup_prop, db_unit, target_unit)
         return 1.0, True
 
 def pull_pivoted_data(base_dir, property_name, unique_months, category_list=None, class_name=None, parent_name=None, is_rate=False, temporal_pattern="monthly", timeslice_name="All Periods"):
