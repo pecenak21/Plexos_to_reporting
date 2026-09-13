@@ -6,6 +6,8 @@ from collections import defaultdict
 from convert_zip_to_parquet import convert_zip_to_parquet
 from transformers import (export_block_to_csv, process_flat_block, process_daily_block, process_nested_block, process_ratings_block, process_3_block, process_32_block)
 from standard_integration_testing import run_sit_validation
+from database import initialize_database_structures
+import exceptions_report
 
 def load_excel_config(config_path):
     xl = pd.ExcelFile(config_path)
@@ -141,6 +143,7 @@ def execute_standard_report(parquet_base_dir, blueprint, asset_groups, output_pa
                 blocks_for_header.append(df_block)
             else:
                 print(f"    - [!] No data returned for: {prop_input}")
+                exceptions_report.record_no_data(header, prop_input, c_in)
         
         if blocks_for_header:
             compiled_sections.append((header, pd.concat(blocks_for_header, axis=0), idx_flag, header_flag))
@@ -201,6 +204,7 @@ def execute_timeslice_report(parquet_base_dir, blueprint_rat, asset_groups, outp
 
 def execute_pipeline(config_path):
     print(f"[+] Initializing report generation from: {config_path}")
+    exceptions_report.reset()
     blueprint, blueprint_rat, asset_groups, input_path, cli_path, dir_name, df_units, overwrite, run_testing, script_path, asset_mapping = load_excel_config(config_path)
 
     parquet_path_out=os.path.join(dir_name, "Parquet Files")
@@ -224,7 +228,13 @@ def execute_pipeline(config_path):
     unique_months = time_df['Month_Label'].unique()
 
     os.makedirs(dir_name, exist_ok=True)
-    
+
+    print("[+] Validating workbook configuration against the solution...")
+    initialize_database_structures(parquet_base_dir)
+    exceptions_report.validate_name_map(asset_mapping)
+    exceptions_report.validate_unit_table(df_units)
+    exceptions_report.validate_blueprint(blueprint, asset_groups)
+
     # Execute Standard Report if blueprint is provided
     if blueprint:
         std_output_path = os.path.join(dir_name, "Standard_Report.csv")
@@ -236,6 +246,9 @@ def execute_pipeline(config_path):
         execute_timeslice_report(parquet_base_dir, blueprint_rat, asset_groups, rat_output_path, years, unique_months, df_units, asset_mapping)
         
     print("[+] All report generation complete.")
+
+    # Written before SIT runs -- when SIT fails, these exceptions are usually the reason
+    exceptions_report.write(dir_name)
 
     if run_testing:
         baseline_dir = f"{script_path}/docs/Baseline Reports"
