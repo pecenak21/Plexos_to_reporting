@@ -468,6 +468,36 @@ def process_3_block(parquet_base_dir, parent_name, child_name, header_name, year
 
     return pd.concat(combined_rows, ignore_index=True) if combined_rows else pd.DataFrame()
 
+def process_23_block(parquet_base_dir, years, unique_months, contract_map):
+    """
+    Custom block for '( 23 ) Contract Fuel Use'.
+
+    One row per fuel mapped in the Contract_name_map sheet, converted from Plexos
+    offtake (MMBtu) into that contract's own unit with the sheet's factor, and labelled
+    with RTSim's fixed-width 'Name        (Unit  )' form. RTSim sums rows of different
+    units into its Total, so this does the same.
+    """
+    months = list(unique_months)
+    # Fuel offtake is reported once under System.Fuels and again per plant under
+    # Generator.Fuels; reading only the System membership avoids counting each fuel twice.
+    df_pivoted = pull_pivoted_data(parquet_base_dir, 'Offtake', unique_months, class_name='Fuel', parent_name='System')
+    by_fuel = df_pivoted.groupby('Object_Name')[months].sum() if not df_pivoted.empty else pd.DataFrame(columns=months)
+
+    rows = {}
+    for plexos_name, report_label, factor in contract_map:
+        series = by_fuel.loc[plexos_name] if plexos_name in by_fuel.index else pd.Series(0.0, index=months)
+        rows[report_label] = rows.get(report_label, 0.0) + series * factor
+    if not rows:
+        return pd.DataFrame()
+
+    df_contracts = pd.DataFrame.from_dict(rows, orient='index')[months]
+    df_grid, _ = build_sum_totals(df_contracts, years, unique_months)
+    df_grid = df_grid.copy()
+    df_grid.loc['  Total '] = df_grid.sum(axis=0)
+    df_grid.index.name = ''
+    return df_grid
+
+
 def export_block_to_csv(file_handle, header_title, df_block, include_index=True, include_header=True):
     """
     Writes section titles, column headers, and pure numeric data directly 
