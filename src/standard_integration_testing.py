@@ -258,6 +258,6 @@ if __name__ == "__main__":
 
     config_path = sys.argv[1] if len(sys.argv) > 1 else 'report_config.xlsx'
     (blueprint, blueprint_rat, asset_groups, input_path, cli_path, base_output_path,
-     df_units, overwrite_yn, integration_test_yn, script_path, asset_mapping) = load_excel_config(config_path)
+     df_units, overwrite_yn, integration_test_yn, script_path, asset_mapping, contract_rows) = load_excel_config(config_path)
 
     run_sit_validation(baseline_dir, base_output_path)

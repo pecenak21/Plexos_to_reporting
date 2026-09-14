@@ -4,7 +4,7 @@ import pandas as pd
 import duckdb
 from collections import defaultdict
 from convert_zip_to_parquet import convert_zip_to_parquet
-from transformers import (export_block_to_csv, process_flat_block, process_daily_block, process_nested_block, process_ratings_block, process_3_block, process_32_block)
+from transformers import (export_block_to_csv, process_flat_block, process_daily_block, process_nested_block, process_ratings_block, process_3_block, process_23_block, process_32_block)
 from standard_integration_testing import run_sit_validation
 from database import initialize_database_structures
 import exceptions_report
@@ -64,10 +64,22 @@ def load_excel_config(config_path):
     df_map = pd.read_excel(xl, 'Generator_name_map')
     asset_mapping = dict(zip(df_map['Resources_Plexos'], df_map['Resources_RTSim']))
     
-    return blueprint, blueprint_rat, asset_groups, input_path, cli_path, base_output_path, df_units, overwrite_yn, integration_test_yn, script_path, asset_mapping
+    # Section 23 contract table: (Plexos fuel, RTSim report label, MMBtu -> contract unit factor).
+    # Labels are kept unstripped -- RTSim's row labels are fixed-width and the padding is significant.
+    contract_rows = []
+    if 'Contract_name_map' in xl.sheet_names:
+        df_contracts = pd.read_excel(xl, 'Contract_name_map')
+        for plexos, label, factor in zip(df_contracts['Resources_Plexos'], df_contracts['Report_Label'],
+                                         df_contracts['ConversionFactor']):
+            if pd.isna(plexos) or not str(plexos).strip():
+                continue
+            label = '' if pd.isna(label) else str(label)
+            contract_rows.append((str(plexos).strip(), label, pd.to_numeric(factor, errors='coerce')))
+
+    return blueprint, blueprint_rat, asset_groups, input_path, cli_path, base_output_path, df_units, overwrite_yn, integration_test_yn, script_path, asset_mapping, contract_rows
 
 
-def execute_standard_report(parquet_base_dir, blueprint, asset_groups, output_path, years, unique_months, df_units, asset_mapping):
+def execute_standard_report(parquet_base_dir, blueprint, asset_groups, output_path, years, unique_months, df_units, asset_mapping, contract_map=()):
     print("[+] Building Standard Report...")
     grouped_blueprint = defaultdict(list)
     for entry in blueprint:
@@ -106,6 +118,11 @@ def execute_standard_report(parquet_base_dir, blueprint, asset_groups, output_pa
                     explicit_unit=unit_val, asset_mapping=asset_mapping
                 )
                 idx_flag, header_flag = False, False
+
+            elif header.startswith("( 23 )"):
+                print(f"Note: Custom Code to match RTSim output")
+                df_block = process_23_block(parquet_base_dir, years, unique_months, contract_map)
+                idx_flag, header_flag = True, True
 
             elif header == "( 32 ) Total Effluents by Type lbs":
                 print(f"Note: Custom Code to match RTSim output")
@@ -222,7 +239,7 @@ def execute_timeslice_report(parquet_base_dir, blueprint_rat, asset_groups, outp
 def execute_pipeline(config_path):
     print(f"[+] Initializing report generation from: {config_path}")
     exceptions_report.reset()
-    blueprint, blueprint_rat, asset_groups, input_path, cli_path, dir_name, df_units, overwrite, run_testing, script_path, asset_mapping = load_excel_config(config_path)
+    blueprint, blueprint_rat, asset_groups, input_path, cli_path, dir_name, df_units, overwrite, run_testing, script_path, asset_mapping, contract_rows = load_excel_config(config_path)
 
     parquet_path_out=os.path.join(dir_name, "Parquet Files")
 
@@ -251,11 +268,13 @@ def execute_pipeline(config_path):
     exceptions_report.validate_name_map(asset_mapping)
     exceptions_report.validate_unit_table(df_units)
     exceptions_report.validate_blueprint(blueprint, asset_groups)
+    exceptions_report.validate_contract_map(contract_rows)
 
     # Execute Standard Report if blueprint is provided
     if blueprint:
         std_output_path = os.path.join(dir_name, "Standard_Report.csv")
-        execute_standard_report(parquet_base_dir, blueprint, asset_groups, std_output_path, years, unique_months, df_units, asset_mapping)
+        contract_map = [(plexos, label, factor) for plexos, label, factor in contract_rows if label.strip()]
+        execute_standard_report(parquet_base_dir, blueprint, asset_groups, std_output_path, years, unique_months, df_units, asset_mapping, contract_map)
         
     # Execute Timeslice Report if blueprint_rat is provided
     if blueprint_rat:

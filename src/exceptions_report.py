@@ -245,6 +245,42 @@ def validate_blueprint(blueprint, asset_groups):
                sorted(empty_groups))
 
 
+def validate_contract_map(contract_rows):
+    """Section 23 contract table: fuels it misses, entries that match nothing, unusable factors."""
+    if not contract_rows:
+        return
+    fuels = set(duckdb.query(
+        "SELECT DISTINCT TRIM(ChildObjectName) AS n FROM mem_fki WHERE LOWER(ChildClassName) = 'fuel'"
+    ).df()['n'])
+    listed = {plexos for plexos, _, _ in contract_rows}
+
+    not_listed = sorted(fuels - listed)
+    if not_listed:
+        record(WARN, "CONTRACT_MAP",
+               f"{len(not_listed)} Plexos fuel(s) are not listed in Contract_name_map -- left out of section 23",
+               not_listed)
+
+    stale = sorted(listed - fuels)
+    if stale:
+        record(WARN, "CONTRACT_MAP",
+               f"{len(stale)} Contract_name_map entr(ies) match no Plexos fuel -- their section 23 rows are all zero",
+               stale)
+
+    unmapped = sorted(plexos for plexos, label, _ in contract_rows if not label.strip() and plexos in fuels)
+    if unmapped:
+        record(INFO, "CONTRACT_MAP",
+               f"{len(unmapped)} Plexos fuel(s) are listed without an RTSim contract -- omitted from section 23",
+               unmapped)
+
+    bad_factor = sorted(f"{plexos} -> {label.strip()} (factor {factor})"
+                        for plexos, label, factor in contract_rows
+                        if label.strip() and (pd.isna(factor) or factor == 0))
+    if bad_factor:
+        record(ERROR, "CONTRACT_MAP",
+               f"{len(bad_factor)} mapped contract(s) have a blank or zero ConversionFactor -- those rows report nothing",
+               bad_factor)
+
+
 def record_unit_miss(property_name, db_unit, target_unit):
     record(WARN, "UNIT_CONVERSION",
            f"No conversion rule for '{db_unit}' -> '{target_unit}' (property '{property_name}'); "
