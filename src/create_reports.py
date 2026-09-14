@@ -12,15 +12,17 @@ import exceptions_report
 def load_excel_config(config_path):
     xl = pd.ExcelFile(config_path)
     
-    # 1. Load Standard Blueprint (Expected: Header, Class, Group, Property, Pattern, Rate, Unit)
+    # 1. Load Standard Blueprint (Expected: Header, Class, Group, Property, Pattern, Rate, Unit, Sign)
     blueprint = []
     if 'Blueprint_std' in xl.sheet_names:
         df_bp = pd.read_excel(xl, 'Blueprint_std')
         df_bp.columns = df_bp.columns.astype(str).str.strip().str.title()
-        expected_std = ['Header', 'Class', 'Group', 'Property', 'Pattern', 'Rate', 'Unit']
+        expected_std = ['Header', 'Class', 'Group', 'Property', 'Pattern', 'Rate', 'Unit', 'Sign']
         for col in expected_std:
             if col not in df_bp.columns:
                 df_bp[col] = ''
+        # Sign flips reporting convention (RTSim shows purchases as negative); blank means +1
+        df_bp['Sign'] = pd.to_numeric(df_bp['Sign'], errors='coerce').fillna(1)
         blueprint = [tuple(x) for x in df_bp[expected_std].to_numpy()]
 
     # 2. Load Timeslice Blueprint (Blueprint_RAT)
@@ -79,8 +81,7 @@ def execute_standard_report(parquet_base_dir, blueprint, asset_groups, output_pa
         
         print(f"[+] Processing section: {header}")
         for row in row_entries:
-            # Unpack all 7 columns safely: Header, Class, Group, Property, Pattern, Rate, Unit
-            _, class_input, group_input, prop_input, temp_pattern, is_rate, unit_val = row
+            _, class_input, group_input, prop_input, temp_pattern, is_rate, unit_val, sign = row
 
             c_in = str(class_input).strip()
             g_in = str(group_input).strip()
@@ -140,11 +141,27 @@ def execute_standard_report(parquet_base_dir, blueprint, asset_groups, output_pa
                 
             if df_block is not None and not df_block.empty:
                 print(f"    - Data retrieved for: {prop_input}")
+                if sign != 1:
+                    # Bespoke/nested blocks carry label and header strings, so only flip numeric cells
+                    df_block = df_block.copy()
+                    for col in df_block.columns:
+                        numeric = pd.to_numeric(df_block[col], errors='coerce')
+                        mask = numeric.notna()
+                        # + 0.0 turns the -0.0 produced by flipping a zero back into 0.0
+                        df_block.loc[mask, col] = numeric[mask] * sign + 0.0
                 blocks_for_header.append(df_block)
             else:
                 print(f"    - [!] No data returned for: {prop_input}")
                 exceptions_report.record_no_data(header, prop_input, c_in)
-        
+
+        # Several flat blocks under one header each bring their own Total row; RTSim shows
+        # a single Total for the whole section, so replace them with one recomputed at the end.
+        if len(blocks_for_header) > 1 and all('Total' in b.index for b in blocks_for_header):
+            body = pd.concat([b.drop(index='Total') for b in blocks_for_header], axis=0)
+            header_is_rate = all(str(r[5]).strip().lower() == 'true' for r in row_entries)
+            total = body.where(body != 0).mean(axis=0).fillna(0) if header_is_rate else body.sum(axis=0)
+            blocks_for_header = [body, total.to_frame('Total').T]
+
         if blocks_for_header:
             compiled_sections.append((header, pd.concat(blocks_for_header, axis=0), idx_flag, header_flag))
 
