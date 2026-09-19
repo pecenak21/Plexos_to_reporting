@@ -52,8 +52,6 @@ def load_excel_config(config_path):
     cli_path = df_summary.loc['CLI_Path', 'Value']
     script_path = script_path.split('src')[0]
     base_output_path = df_summary.loc['OutputPath', 'Value']
-    overwrite_yn = df_summary.loc['Overwrite_Parquet', 'Value']
-    integration_test_yn = df_summary.loc['Run_Integration_Test', 'Value']
 
     # Load UnitConversion
     df_units = pd.read_excel(xl, 'UnitConversion')
@@ -76,7 +74,7 @@ def load_excel_config(config_path):
             label = '' if pd.isna(label) else str(label)
             contract_rows.append((str(plexos).strip(), label, pd.to_numeric(factor, errors='coerce')))
 
-    return blueprint, blueprint_rat, asset_groups, input_path, cli_path, base_output_path, df_units, overwrite_yn, integration_test_yn, script_path, asset_mapping, contract_rows
+    return blueprint, blueprint_rat, asset_groups, input_path, cli_path, base_output_path, df_units, script_path, asset_mapping, contract_rows
 
 
 def execute_standard_report(parquet_base_dir, blueprint, asset_groups, output_path, years, unique_months, df_units, asset_mapping, contract_map=()):
@@ -239,11 +237,11 @@ def execute_timeslice_report(parquet_base_dir, blueprint_rat, asset_groups, outp
 def execute_pipeline(config_path):
     print(f"[+] Initializing report generation from: {config_path}")
     exceptions_report.reset()
-    blueprint, blueprint_rat, asset_groups, input_path, cli_path, dir_name, df_units, overwrite, run_testing, script_path, asset_mapping, contract_rows = load_excel_config(config_path)
+    blueprint, blueprint_rat, asset_groups, input_path, cli_path, dir_name, df_units, script_path, asset_mapping, contract_rows = load_excel_config(config_path)
 
     parquet_path_out=os.path.join(dir_name, "Parquet Files")
 
-    parquet_base_dir = convert_zip_to_parquet(input_path, cli_path=cli_path, output_dir=parquet_path_out, overwrite=overwrite)
+    parquet_base_dir = convert_zip_to_parquet(input_path, cli_path=cli_path, output_dir=parquet_path_out)
     if parquet_base_dir is None: return
     
     base_dir_clean = str(parquet_base_dir).replace('\\', '/')
@@ -286,13 +284,11 @@ def execute_pipeline(config_path):
     # Written before SIT runs -- when SIT fails, these exceptions are usually the reason
     exceptions_report.write(dir_name)
 
-    if run_testing:
-        baseline_dir = f"{script_path}/docs/Baseline Reports"
-        
-        passed = run_sit_validation(baseline_dir, dir_name)
-        if not passed:
-            raise RuntimeError("SIT validation failed against baseline reports.")
-        
+    baseline_dir = f"{script_path}/docs/Baseline Reports"
+    passed = run_sit_validation(baseline_dir, dir_name)
+    if not passed:
+        raise RuntimeError("SIT validation failed against baseline reports.")
+
     print("[+] Report testing complete.")
 
 

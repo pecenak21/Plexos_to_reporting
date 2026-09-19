@@ -63,13 +63,15 @@ def find_plexos_cli(cli_path=""):
     print("[-] Could not find 'plexos-cloud.exe' in standard locations.")
     return None
 
-def convert_zip_to_parquet(zip_file_path, cli_path="", output_dir=None, overwrite=False):
+def convert_zip_to_parquet(zip_file_path, cli_path="", output_dir=None):
     """
     Converts PLEXOS .zip to parquet.
-    
+
+    Existing parquet output is always reused -- conversion only runs when no
+    parquet files are found, so a partial directory from a failed run is rebuilt.
+
     :param zip_file_path: Path to the input zip file.
     :param output_dir: Optional custom path for output. Defaults to zip folder.
-    :param overwrite: If True, deletes existing output directory before starting.
     """
     zip_path = Path(zip_file_path).resolve()
     if not zip_path.exists():
@@ -83,12 +85,11 @@ def convert_zip_to_parquet(zip_file_path, cli_path="", output_dir=None, overwrit
         output_dir = Path(output_dir)
     # Handle existing directory
     if output_dir.exists():
-        if overwrite:
-            print(f"[!] Overwrite enabled. Removing existing: {output_dir}")
-            shutil.rmtree(output_dir)
-        else:
-            print(f"[~] Directory exists. Skipping: {output_dir}")
+        if any(output_dir.rglob("*.parquet")):
+            print(f"[~] Parquet files already present. Skipping conversion: {output_dir}")
             return output_dir
+        print(f"[!] No parquet files found. Rebuilding: {output_dir}")
+        shutil.rmtree(output_dir)
             
     # Locate CLI
     plexos_cli_path = find_plexos_cli(cli_path=cli_path)
