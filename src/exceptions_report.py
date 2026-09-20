@@ -134,38 +134,64 @@ def validate_name_map(asset_mapping, coverage_threshold=0.5):
         )
 
 
+def _rate_text(value):
+    """Conversion rates read back as floats; print them without trailing zeros."""
+    try:
+        return f"{float(value):g}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
 def validate_unit_table(df_units):
-    """Unit sheet sanity: Excel-coerced labels, unusable rates, contradictory duplicates."""
+    """Unit sheet sanity: Excel-coerced labels, unusable rates, contradictory duplicates.
+
+    Details name the sheet row so the offending cell can be found directly -- a label
+    Excel turned into a number prints as '0', which says nothing about where it lives.
+    """
+    # Row 1 of the sheet is the header, so DataFrame index 0 is sheet row 2.
+    def sheet_row(idx):
+        return idx + 2
+
+    # Right-aligning the row numbers keeps the detail lines in sheet order once record()
+    # sorts them, and lines the values up under each other in the log.
+    width = len(str(sheet_row(len(df_units) - 1))) if len(df_units) else 1
+
     coerced = []
-    for col in ('UnitFrom', 'UnitTo'):
-        for value in df_units[col]:
+    for row in df_units.itertuples():
+        rule = f'"{row.UnitFrom}" -> "{row.UnitTo}", rate {_rate_text(row.ConversionRate)}'
+        for col, value in (('UnitFrom', row.UnitFrom), ('UnitTo', row.UnitTo)):
             text = str(value).strip()
             # '$000' typed into Excel becomes the number 0, which then never matches a
             # real unitValue -- the conversion silently no-ops and values stay 1000x off.
             if text and text.replace('.', '', 1).replace('-', '', 1).isdigit():
-                coerced.append(f"{col} = '{text}' (numeric -- was this meant to be a text unit like '$000'?)")
+                coerced.append(f"row {sheet_row(row.Index):>{width}}, {col:<8} = {text:<6} (rule reads {rule})")
     if coerced:
         record(ERROR, "UNIT_CONVERSION",
-               f"{len(coerced)} unit label(s) stored as numbers rather than text; these rules can never match",
-               sorted(set(coerced)))
+               f"{len(coerced)} unit label(s) on the UnitConversion sheet are numbers rather than text. "
+               f"A rule with a numeric label can never match a unit, so any value it was meant to scale "
+               f"is written out unconverted. Excel stores a label like $000 as the number 0 -- format "
+               f"the cell as Text, then retype the label.",
+               coerced)
 
     bad_rate = df_units[df_units['ConversionRate'].isna() | (df_units['ConversionRate'] == 0)]
     if not bad_rate.empty:
         record(ERROR, "UNIT_CONVERSION",
                f"{len(bad_rate)} conversion rule(s) have a blank or zero rate -- applying one "
                f"blanks out the affected section",
-               [f"{r.UnitFrom} -> {r.UnitTo} = {r.ConversionRate}" for r in bad_rate.itertuples()])
+               [f'row {sheet_row(r.Index):>{width}}, "{r.UnitFrom}" -> "{r.UnitTo}" = {r.ConversionRate}'
+                for r in bad_rate.itertuples()])
 
     pairs = df_units.assign(
         _from=df_units['UnitFrom'].str.lower().str.strip(),
         _to=df_units['UnitTo'].str.lower().str.strip(),
     )
     dupes = pairs[pairs.duplicated(subset=['_from', '_to'], keep=False)]
-    conflicting = [
-        f"{key[0]} -> {key[1]}: rates {sorted(set(grp['ConversionRate']))}"
-        for key, grp in dupes.groupby(['_from', '_to'])
-        if grp['ConversionRate'].nunique() > 1
-    ]
+    conflicting = []
+    for key, grp in dupes.groupby(['_from', '_to']):
+        if grp['ConversionRate'].nunique() > 1:
+            rows = ", ".join(str(sheet_row(i)) for i in sorted(grp.index))
+            rates = sorted(set(grp['ConversionRate']))
+            conflicting.append(f'"{key[0]}" -> "{key[1]}": rates {rates} on rows {rows}')
     if conflicting:
         record(WARN, "UNIT_CONVERSION",
                f"{len(conflicting)} unit pair(s) defined more than once with different rates "
