@@ -199,7 +199,7 @@ def validate_blueprint(blueprint, asset_groups):
         parent_props[parent_cls].add(prop)
 
     missing_class, missing_prop = [], []
-    for header, class_input, _group, prop_input, _pattern, _rate, _unit in blueprint:
+    for header, class_input, _group, prop_input, *_ in blueprint:
         raw_cls = str(class_input).strip().lower()
         prop = str(prop_input).strip().lower()
         # Nested entries are written 'Parent.Child'; their properties belong to the
