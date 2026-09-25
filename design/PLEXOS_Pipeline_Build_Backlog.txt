@@ -1,0 +1,2294 @@
+# PLEXOS Input Pipeline — Build Backlog
+
+**Audience:** the build team. Assumes PLEXOS, `plexos_sdk` and the design docs. Not an APS-facing document.
+
+**Sources this backlog is derived from:**
+
+| Source | Role |
+|---|---|
+| `claude/Task2_Technical_Design.md` | The build spec. Every story cites a section of it. |
+| `claude/Task2_D3_Problem_Definition.md` | Why each decision is what it is. Read when a story's rationale is challenged. |
+| `APS_Plexos_Input_Pipeline_Task5.docx` (v4) | The APS-facing deliverable. Carries the scenario / Read Order / build report decisions made **after** the technical design was last written — those are marked **[LATE]** below. |
+| `APS_Plexos_Input_Workbook_Example.xlsx` | The agreed interface shape for the workbook stories. |
+
+---
+
+## 1. How this backlog was built, and how to keep it honest
+
+The method, so it can be repeated as the design moves:
+
+1. **Epics come from components, not from features.** The design doc already names eight components (C1–C8). Each became an epic; nothing was invented and nothing was dropped. That keeps the backlog and the design in one-to-one correspondence — if a component is missing an epic, the design has a gap.
+2. **Stories come from the things that can fail independently.** A story is one thing that can be built, demonstrated and broken on its own. "Write a Sources row" is a story; "the build script" is not.
+3. **Acceptance criteria come from the design's `[PROPOSED]` rules.** Every rule the design states — "overlap is an error, not a precedence rule", "never run-stamp the data folder", "the build must not stop on a condition it can resolve" — is written as a Given/When/Then so it can be tested rather than remembered.
+4. **`[CONFIRM]` items become either a spike story or a blocking question.** If we can close it ourselves it is a spike with acceptance criteria. If only APS can close it, it is listed in §5 and named on the stories it blocks. Nothing marked `[CONFIRM]` is silently assumed.
+5. **Every story cites its design section.** When the design changes, a grep for the section number finds the stories that need to change with it.
+
+**Keeping it honest:** when a design decision changes, update the design doc first and the story second. The design doc is the source of truth; this backlog is a projection of it.
+
+---
+
+## 2. Conventions
+
+**Story ID prefixes** map to epics: `CDM`, `DIFF`, `FMT`, `WBK`, `BLD`, `WRT`, `VAL`, `RPT`, `PRE`, `OPS`.
+
+**Size:** `S` ≤ 1 day · `M` 2–3 days · `L` 4–8 days. Anything larger gets split before it is started.
+
+**Story types:**
+
+- **Story** — produces working code behind an acceptance test.
+- **Spike** — produces an answer and a written note, not production code. Time-boxed. Every spike's acceptance criterion is "the answer is recorded in the design doc and the stories it blocks are updated."
+- **Chore** — infrastructure with no user-visible behaviour.
+
+**Definition of Ready.** A story is ready when: its acceptance criteria are written; every `[CONFIRM]` it depends on is closed or explicitly deferred with a stated assumption; the real APS file it will be tested against is identified by name; and its dependencies are `Done`.
+
+**Definition of Done.** Code merged; acceptance criteria covered by an automated test; the test runs against a **real APS artifact** (the populated model, a real source file, a real archived run) and not only a fixture; the design doc updated if the build revealed something the design got wrong.
+
+**The standing behavioural rule**, which shapes several acceptance criteria and is easy to get backwards:
+
+> **Model conditions get resolved and logged. Bad input data stops the build.**
+
+A condition the build can resolve on its own — a Read Order to pick, a variable to carry across, a data file already present — is resolved, recorded in the build report, and the run continues. A source file that is malformed, has gaps, names objects that do not exist, or does not cover the model horizon stops the build before anything is written. *The run must go on; a model nobody can trust must not be produced.*
+
+### 2.1 Two further standing rules, from APS's answers (2026-09-20)
+
+**Anything the diff cannot catch must be stated explicitly in the build report.** APS's answer to Q10, in their words: *"It is critical that assumptions like this are called out explicitly. A diff report won't catch these."*
+
+This is the sharpest constraint in the whole set, and it is not a reporting preference — it is a correctness requirement, because it names the gap the comparison tooling structurally cannot close. A conditional variable carried onto a new link changes what PLEXOS computes and leaves **no trace** in any of the four diff levels: the structure is unchanged, the assignment records match, and the CSV values are identical. A modeller reading a clean diff would conclude nothing happened.
+
+So the test for every build-time decision is not "is it logged somewhere" but: **would the diff show this? If no, the build report must say it in words.** That applies to variables carried across (WRT-08), Read Orders chosen (WRT-06), files placed by inference (WRT-03), objects left uncovered (VAL-04), pre-existing model conditions tolerated (VAL-06, BLD-01) and every CLI override (WBK-06). BLD-08's ledger is the mechanism; this is the rule that decides what goes in it.
+
+**Assume nothing about APS's current model.** Q4: *"The code can take any model as starting point. Don't assume anything from this model."*
+
+Every figure this backlog quotes off `2026 APS_TA V3.1` — 952 objects, 84 Data File objects, 100 referenced paths, 121 files, 21 orphans, 215 generators, 8 regions, the `TimeSeries` tree name, Read Order 2000, the ten subfolder names — is a **test fixture, not a specification**. Each is legitimate in an acceptance criterion as *the expected result for that model*, and illegitimate anywhere in the code as a constant, a default, or a structural assumption. The two places this already bites: `tree_root_name` reads the model's own paths rather than hardcoding `TimeSeries` (CDM-06), and `max_read_order` reads the target model's own scenarios rather than assuming a range (CDM-07). Hold the same line everywhere else.
+
+A useful discipline when writing a test: if the assertion would have to change when APS versions the model, it is asserting the fixture. Assert the *rule* instead, and let the number be whatever the model says.
+
+### 2.2 The workbook is the interface
+
+Q2: *"The workbook runs everything… It needs to be the source of truth and house necessary options."* This is a manual process run by a person, not an automated pipeline.
+
+Consequences for the build:
+
+- **A new option gets a Run sheet cell first.** A CLI flag is not an alternative to a cell; it is a convenience on top of one. WBK-06 is demoted accordingly.
+- **No behaviour is reachable only from the command line**, with one deliberate exception below.
+- **The archived workbook is the complete record of a run** — which is what makes §12's archive worth keeping, and why WBK-06 has to report every override that made the archived sheet inaccurate.
+
+**The one exception, and it needs your sign-off:** `--force`, which lets a build write into a run folder that already exists. It stays command-line-only because a destructive option living in a cell is one someone leaves switched on from last time and does not notice. That is precisely the failure "source of truth" does not protect against — the cell would be truthful and still wrong. `--dry-run` is command-line-only for the same reason in reverse: it is a thing you do once, not a setting. Say if you would rather both were cells.
+
+---
+
+## 3. Epic map
+
+| Epic | Component | What it delivers | Phase | Stories |
+|---|---|---|---|---|
+| **A. CDM — the model as a queryable database** | C6 | `.db` generation, DuckDB access, `v_membership` / `v_property` views, model introspection helpers | 1 | CDM-01 … CDM-08 |
+| **B. Comparison engine** | C7 | `compare(old, new)`, four diff levels, standalone and build-triggered entry points | 2 | DIFF-01 … DIFF-07 |
+| **C. Standard Format and file validation** | C2, C5 | Format reader, granularity inference, shape rule, checkpoint 1, blank templates | 3 | FMT-01 … FMT-05 |
+| **D. Sources workbook** | C3 | Run / Data / Compare sheet readers, schema validation, CLI overrides | 4 | WBK-01 … WBK-06 |
+| **E. Build orchestration** | C4 | Pre-flight, run folder, copy-forward, the build sequence, the exception ledger, archiving | 5 | BLD-01 … BLD-08 |
+| **F. PLEXOS write path** | C4 | Name resolution, Data File objects, the scenario, Read Order, second link, variables, idempotency | 5 | WRT-01 … WRT-11 |
+| **G. Semantic validation** | C5 | Checkpoint 2 — resolution, existence, overlap, coverage, horizon | 6 | VAL-01 … VAL-06 |
+| **H. Reporting** | C8 | Two artifacts, per Q11: a **flat build report** (what the build decided) and a **diff workbook** (what changed) | 7 | RPT-01 … RPT-05 |
+| **I. Preprocessors and templates** | C1 | One script per legacy source, to the established conventions | 8 | PRE-01 … PRE-07 |
+| **J. Packaging and handover** | — | Repo, dependencies, CLI, logging, runbook | throughout | OPS-01 … OPS-04 |
+
+**Phase order is not negotiable in one respect:** phase 1 before everything, because every downstream component reads through those views, and phase 2 next, because a diff that can prove "nothing changed" on an unmodified model is the cheapest correctness check available for the whole pipeline. (§14)
+
+---
+
+## 4. Suggested sprint sequencing
+
+Two-week sprints, one build team. Adjust to actual capacity; the ordering is what matters.
+
+| Sprint | Goal — stated as a demo, not a list | Stories |
+|---|---|---|
+| **1** | *"Here is APS's real model as a SQL database, and here are its properties in one flat table."* | OPS-01, CDM-01, CDM-02, CDM-03 (spike), CDM-04, CDM-05 |
+| **2** | *"Here is a diff of a run against itself — zero differences — and against a copy we broke on purpose."* | CDM-06, CDM-07, CDM-08, DIFF-01, DIFF-02, DIFF-03, DIFF-06 |
+| **3** | *"Here is a real APS source file being read, validated, and rejected for the right reasons."* | **WBK-04 first**, then FMT-01, FMT-02, FMT-03, FMT-04, FMT-05, WBK-01, WBK-02, WBK-03 |
+| **4** | *"Here is a run folder created from a real model, with the whole data-file tree copied forward and every path still resolving."* | BLD-01, BLD-02, BLD-03, BLD-05, BLD-07, WBK-05, WBK-06 |
+| **5** | *"Here is one property re-pointed at a file we wrote, in our own scenario, and PLEXOS reads our value."* | WRT-01, WRT-02, WRT-03, WRT-04, WRT-10 (spike) |
+| **6** | *"Here is the scenario winning against APS's existing scenarios, with the variable carried across, twice in a row, identically."* | WRT-05, WRT-06, WRT-07, WRT-08, WRT-09, WRT-11 (spike) |
+| **7** | *"Here is a build that refuses to run on bad data and tells you everything wrong at once."* | VAL-01 … VAL-06, BLD-04, BLD-08 |
+| **8** | *"Here is the build report for a real run."* | RPT-01 … RPT-05, DIFF-04, DIFF-05, DIFF-07, BLD-06 |
+| **9+** | *"Here is every legacy source feeding the pipeline unattended."* | PRE-01 … PRE-07, OPS-02, OPS-03, OPS-04 |
+
+The write path (sprints 5–6) is deliberately late. It is the only part of the pipeline that changes a model, and it is much cheaper to get wrong once the diff exists to show exactly what it did.
+
+---
+
+## 5. Blocking questions — answered 2026-09-20
+
+Carried from §15 of the technical design and put to APS. **All eighteen are now closed** — fifteen on 2026-09-20 and the last three on 2026-09-21. The answers are recorded here and carried into the stories they affect. Nothing in the backlog is waiting on APS.
+
+### 5.1 Answered — these are now design facts
+
+| # | Question | Answer | What changed |
+|---|---|---|---|
+| Q1 | Is the Cloud CLI installed and licensed? | **Yes, on every machine that will run this, with a licence for every user.** | The one hard external dependency is closed. OPS-01 and DIFF-05 unblocked; nothing in the backlog is gated on it any more. |
+| Q2 | Workbook-driven or automation-triggered? | **The workbook runs everything.** This is a manual process. A person fills in the workbook and runs everything from it. *"It needs to be the source of truth and house necessary options."* | Settles §6.1.1's open question in favour of the workbook. WBK-06 is demoted from a peer interface to a convenience, and **any new option gets a Run sheet cell first** — see §2.1. |
+| Q3 | Enforce `CWP MMDDYYYY` for `run_name`? | **No — accept any folder name.** | BLD-02 drops the pattern check and the warning. |
+| Q4 | Is `2026 APS_TA V3.1` the standing starting point? | **It is the current working model, versioned by hand with a new name; the naming is unsettled and does not matter.** *"The code can take any model as starting point. Don't assume anything from this model."* | Becomes a standing constraint — see §2.2. Every number this backlog quotes from that model is a fixture, not a contract. |
+| Q5 | Is `target_model` standing or per-run? | **Per run. Nothing is standard.** *"The code needs to be flexible to work with any model."* | CDM-07, CDM-08, VAL-05 and WRT-05 unblocked, and all four must resolve the model at runtime from the Run sheet rather than caching a default. |
+| Q7 | Data File object naming? | **Adopt the file-derived convention.** | WRT-02 closed: `hr_RenewableProfile.csv` → Data File object `hr_RenewableProfile`. Existing objects are still never renamed. |
+| Q8 | Is class + collection enough to disambiguate a property? | **Yes.** | WRT-01 and VAL-01 closed. The four name columns are a complete key; no fifth column needed. |
+| Q10 | Should the derate / adder variables apply to build-written data? | **Yes, they should apply — "but should be called out explicitly in the build report! It is critical that assumptions like this are called out explicitly. A diff report won't catch these."** | WRT-08 confirmed as written. The second half is more important than the first and is promoted to a standing principle — see §2.1. |
+| Q11 | Report format? | **Two different artifacts.** The **build report** can be flat. The **diff report** should be a workbook: a summary page, then detailed pages. | Epic H restructured. RPT-01 is now the flat build report; RPT-02 and RPT-03 are the diff workbook's summary and detail sheets. |
+| Q12 | Which template shapes are needed? | **Not known yet — "let's have a slew of them."** | FMT-05 builds all eight shapes rather than waiting. |
+| Q13 | Does an existing driver workbook need replacing? | **No — there is no existing infrastructure.** Today it is the PLEXOS interface and files made by hand. | WBK-04 unblocked and simplified: nothing to coexist with. Also means `Input Creation Driver.xlsx`, which appears in §12 of the design and in the deliverable's folder figure, **names a file that does not exist** and should come out of both. |
+| Q14 | Adopt per-run archiving, and does the layout suit? | **Yes, and yes.** | BLD-02 and BLD-06 unblocked. The comparison capability's precondition is secured. |
+| Q15 | Do modelers read values inline in Desktop's property grid? | **No.** | §3.3's known cost is not a cost. Writing everything through Datafiles is settled with no caveat. |
+| Q16 | Is the validation rule set right? | **Yes.** | FMT-03 and VAL-01 … VAL-06 unblocked as specified. |
+| Q18 | Where does the scenario name live? | **"Everything should live in the run sheet cell."** | `scenario_name` becomes a Run sheet row. WBK-04 adds it; WRT-05's rename behaviour becomes testable. |
+
+### 5.2 The last three, answered 2026-09-21
+
+| # | Question | Answer | What changed |
+|---|---|---|---|
+| Q6 | Which folder does a new data file go in? | **Add a `target_folder` column, defaulting to `APS_Inputs`.** | WRT-03 closed, and the rule is simpler than the one it replaces — see below. WBK-02 gains the column. |
+| Q9 | Should incomplete object coverage warn or stop? | **Carry on and warn.** | VAL-04 closed: warning severity, and every uncovered object named in the build report. |
+| Q17 | Does the Cloud CLI have a Change Database subcommand? | **Closed by decision rather than investigation:** *"If it's not in the SDK, let's assume it doesn't exist."* | The spike that was going to check it is dropped. Epic B is built as specified, with no caveat left hanging in its premise. |
+
+**Q6's answer improves the placement rule rather than just settling it.** The rule it replaces put each new file under a folder named for its PLEXOS class — `TimeSeries\APS_Inputs\` now replaces `TimeSeries\Generator\`, `TimeSeries\Fuels\` and the rest. Three reasons that is better, not merely different:
+
+1. **Nothing has to be inferred.** The class-name rule had no answer for the tree's workflow folders (`Aurora\`, `LT Builds\`, `Load Following\`, `Market\`), and no rule the build could apply to know when one of those was the right home. Now there is nothing to work out.
+2. **It separates what the build wrote from what APS wrote, on disk, at a glance.** That is WRT-03's central rule — *the build only ever writes files it owns* — made visible in a folder listing rather than only in a diff. Someone can open `APS_Inputs\` and see exactly what this pipeline produced.
+3. **It is still overridable per file.** A file that genuinely belongs beside its siblings goes there by being told to, in the cell, rather than by the build guessing.
+
+---
+
+### 5.3 Nothing is blocked
+
+Every question put to APS is closed. The unknowns that remain are ours, and each already has a spike: **CDM-03** (the `v_property` joins), **CDM-04**'s cross-check against Energy Exemplar's own output, **CDM-06**'s absolute-path check, **CDM-07**'s `t_attribute` schema path, **WRT-10** (`remove_property` removal scope) and **WRT-11** (batch write performance). None blocks a start; CDM-03 and CDM-07 are the two that would cost real rework if left until after the code they underpin.
+
+---
+
+## EPIC A — CDM: the model as a queryable database
+
+**Component C6.** Phase 1. The decision this epic rests on: there is no separate canonical database. PLEXOS's own model, converted to SQLite, *is* the canonical data model — normalized, queryable, and incapable of drifting out of step with the model because it is the model. What this epic builds is not an ETL pipeline; it is the `.db` generation step plus a small set of pre-joined views that make the normalized tables readable.
+
+---
+
+### CDM-01 — Generate a queryable `.db` from a model `.xml`
+
+**As** any component that needs to read a model, **I want** a single function that hands me a `.db` for a given `.xml`, **so that** no component has to care whether one already existed.
+
+**Type:** Story · **Size:** S · **Traces to:** §2.5, §10.1 · **Depends on:** OPS-01
+
+**Spec**
+
+```python
+def ensure_db(xml_path: Path, db_path: Path | None = None, *, force: bool = True) -> Path
+```
+
+- Default `db_path` is `xml_path.with_suffix(".db")`, written **beside the `.xml`**, never in a temp directory — the run archive keeps it (§12).
+- Shells out to `plexos-sdk xml-to-db <xml> <db>` (the SDK's documented conversion, which is backed by the Cloud CLI).
+- `force=True` — the default, and what the diff tool uses — regenerates unconditionally, overwriting any existing `.db`. This is deliberate: an existing `.db` may be stale, may not correspond to the current `.xml`, and per §2.5 usually will not exist at all. "Which `.db` is current" must never be a question anyone has to answer.
+- `force=False` is for the build script's own working copy only, where it just produced the `.db` itself.
+- Non-zero exit from the CLI raises `PlexosConversionError` carrying the CLI's stderr verbatim. Do not summarise the CLI's error; the modeller needs its text.
+
+**Acceptance criteria**
+
+1. **Given** an `.xml` with no `.db` beside it, **when** `ensure_db` is called, **then** a `.db` is created beside it and its path returned.
+2. **Given** an `.xml` with a stale `.db` beside it (a `.db` generated from a different model), **when** `ensure_db` is called with the default `force=True`, **then** the `.db` is overwritten and its content reflects the current `.xml`.
+3. **Given** the Cloud CLI is not on PATH, **when** `ensure_db` is called, **then** it raises with a message naming the missing executable and pointing at the dependency note — not a bare `FileNotFoundError`.
+4. **Given** a malformed `.xml`, **when** `ensure_db` is called, **then** the CLI's own stderr appears unaltered in the raised exception.
+
+**Tests**
+
+- Round-trip against `2026 APS_TA V3.1 - Copy.xml` (952 objects, 84 Data File objects): the generated `.db` contains 952 rows in `t_object`.
+- `xml → db → xml` produces a model that re-converts to a byte-identical `.db`. (Not byte-identical XML — the CLI is not guaranteed to preserve formatting.)
+
+---
+
+### CDM-02 — Read a `.db` through DuckDB, read-only
+
+**As** the diff tool and the CDM consumers, **I want** one connection helper, **so that** nothing in the codebase opens a model database a second, different way.
+
+**Type:** Chore · **Size:** S · **Traces to:** §9.3 · **Depends on:** CDM-01
+
+**Spec**
+
+```python
+@contextmanager
+def open_model(db_path: Path, alias: str = "m") -> duckdb.DuckDBPyConnection
+```
+
+- `duckdb.connect()` in memory, then `ATTACH '<db_path>' AS <alias> (TYPE SQLITE, READ_ONLY)`.
+- **Read-only is not optional.** Nothing in the read path may write to a model database; writes go through `plexos_sdk` and nowhere else. This is the same pattern Energy Exemplar's own `QueryWriteMemberships` uses.
+- A second overload attaches two databases under `old` / `new` for the diff (DIFF-03).
+- Views (CDM-04, CDM-05) are created in the in-memory DuckDB session against the attached alias, **not** persisted into the SQLite file — so the archived `.db` stays exactly what the CLI produced.
+
+**Acceptance criteria**
+
+1. **Given** a valid `.db`, **when** opened, **then** `SELECT count(*) FROM m.t_object` returns the object count.
+2. **Given** an open connection, **when** any `INSERT`/`UPDATE`/`DELETE` is attempted against the attached alias, **then** DuckDB raises rather than writing.
+3. **Given** two databases attached as `old` and `new`, **when** a query names `old.t_object` and `new.t_object` in one statement, **then** it executes.
+4. **Given** the context manager exits by exception, **then** the connection is closed and the SQLite file is not left locked.
+
+---
+
+### CDM-03 — [SPIKE] Verify the `t_tag` / `t_text` / `t_membership` join assumptions
+
+**As** the build team, **I want** the three unverified joins in the `v_property` sketch proven against the real populated model, **so that** the view everything downstream depends on is not built on an assumption.
+
+**Type:** Spike · **Size:** M · **Time-box:** 2 days · **Traces to:** §9.2, open item #1 · **Depends on:** CDM-02
+
+**Why this is first.** §2.2's linkage chain was traced record-by-record and is solid. The three joins below were inferred from documentation and from another script's SQL, and were **not** traced. Every downstream component reads through `v_property`. Getting this wrong means a diff that silently misses or invents changes.
+
+**Questions to answer, each against `2026 APS_TA V3.1 - Copy.xml`:**
+
+1. **`t_tag` holds more than one kind of tag.** Data File, scenario and expression tags all live in `t_tag`, distinguished by the tagged object's class. Confirm: what `class_id` does a Data File tag's object carry, what does a Scenario tag's carry, and can one `data_id` carry several tags at once? If it can, the view must aggregate rather than flat-join — a flat join would multiply rows and inflate every count downstream.
+2. **`t_text` rows are typed by `class_id`** (`data_file_text` vs `time_slice_text` vs `expression_text`). Read the actual `class_id` value for data-file text off the model, and confirm whether a single `data_id` can carry more than one text row.
+3. **Do `t_membership.parent_class_id` and `child_class_id` exist?** The traced column list in §2.2 is `membership_id, parent_object_id, collection_id, child_object_id` — the class columns both views join on were not among them. Very likely present (EE's `QueryWriteMemberships` joins exactly these). If absent, resolve class through `t_object` instead and update both view definitions.
+
+**Acceptance criteria**
+
+1. Each of the three questions has an answer backed by a query result pasted into the design doc, not a citation.
+2. §9.2 of the technical design is rewritten with the confirmed joins and its three `[CONFIRM]` markers removed or converted to findings.
+3. CDM-04 and CDM-05 are updated to match before either is started.
+4. A count check is recorded: the number of `t_data` rows equals the number of `v_property` rows. Any inequality is explained (not hand-waved) before the spike closes.
+
+---
+
+### CDM-04 — `v_membership` view
+
+**As** the structural diff, **I want** one row per relationship in the model with every side named, **so that** structure can be compared without joining five tables at each call site.
+
+**Type:** Story · **Size:** S · **Traces to:** §9.1 · **Depends on:** CDM-03
+
+**Spec**
+
+Columns: `parent_class, child_class, collection, parent_object, child_object`. Joins `t_membership` to `t_object` twice, `t_collection` once, `t_class` twice. Shape deliberately matches Energy Exemplar's `QueryWriteMemberships` output so it can be compared row-for-row against theirs.
+
+**Acceptance criteria**
+
+1. **Given** the populated APS model, **when** `v_membership` is queried, **then** row count equals `SELECT count(*) FROM t_membership` — no join drops or multiplies rows.
+2. **Given** a known generator, **when** filtered to it, **then** its region membership appears with both class names and the collection name spelled as PLEXOS spells them.
+3. **Given** the view, **then** no column is `NULL` for any row — every membership has both ends and a collection.
+4. **Cross-check:** running EE's `QueryWriteMemberships` against the same model produces the same row set (order-insensitive). Any difference is investigated before this story is Done. *(This absorbs open item #5.)*
+
+---
+
+### CDM-05 — `v_property` view
+
+**As** the assignment diff, validation and anyone asking "what is this set to", **I want** one row per property value assignment with its data file, scenario, band and date window resolved, **so that** the model is browsable and diffable as a flat table.
+
+**Type:** Story · **Size:** M · **Traces to:** §9.2 · **Depends on:** CDM-03
+
+**Spec**
+
+Columns: `parent_class, parent_object, collection, child_class, child_object, property, band_id, value, data_file_path, data_file_object, scenario, date_from, date_to`.
+
+Built from `t_data` joined to `t_membership`, `t_property`, `t_collection`, `t_object` (×2), `t_class` (×2), with LEFT joins to `t_text`, `t_tag` → Data File object, `t_tag` → Scenario object, `t_date_from`, `t_date_to`.
+
+**The corrections CDM-03 must deliver before this is written:**
+
+- The `t_tag` joins filter on the tagged object's class — Data File for `data_file_object`, Scenario for `scenario`. The sketch in §9.2 joins `tg.object_id` twice blindly, which is wrong.
+- The `t_text` join filters on the data-file text class.
+- If one `data_id` can carry multiple tags of the same kind, resolve as an aggregate.
+
+**This view is the substrate for the diff**, so its identity columns must exactly match DIFF-03's natural key. Any column added here that is not in that key will silently fail to participate in matching.
+
+**Acceptance criteria**
+
+1. **Given** the populated APS model, **when** `v_property` is queried, **then** its row count equals `t_data`'s row count. A larger count means a join is multiplying rows and the view is wrong.
+2. **Given** Data File object `object_id=614` ("APS hourly LMP"), **when** filtered on `data_file_object`, **then** `Offer Price` and `Bid Price` records appear for the two BESS generators, with the shared CSV path in `data_file_path` — this is the one linkage traced end-to-end in §2.2 and is the reference case.
+3. **Given** a property with no data file, **then** `data_file_path` and `data_file_object` are `NULL` and `value` is populated.
+4. **Given** a property carrying a scenario tag, **then** `scenario` holds the scenario's name and `data_file_object` is not contaminated with it.
+5. **Given** the model's 100 distinct stored data-file paths, **when** `SELECT DISTINCT data_file_path WHERE data_file_path IS NOT NULL` is run, **then** 100 rows come back. (Without the `IS NOT NULL`, `DISTINCT` returns `NULL` as a row and the answer is 101 — the guard is the point of the criterion.)
+
+---
+
+### CDM-06 — Model introspection: stored data-file paths
+
+**As** the build's pre-flight, **I want** the list of every data-file path a model expects to resolve, plus the folder name those paths begin with, **so that** the tree can be checked and copied before anything is created.
+
+**Type:** Story · **Size:** S · **Traces to:** §6.1.1, §7.1.1 · **Depends on:** CDM-05
+
+**Spec**
+
+```python
+def stored_data_file_paths(db) -> list[str]          # relative, as stored, e.g. "TimeSeries\\Generator\\An_FOM.csv"
+def tree_root_name(db) -> str                        # the common first segment, e.g. "TimeSeries"
+```
+
+- Paths are read from `v_property.data_file_path`, distinct, preserving the stored form including backslashes and casing.
+- `tree_root_name` takes the **common first path segment** across all stored paths. It does **not** hardcode `TimeSeries` — the build reads the model's own convention so it survives a model that uses a different one.
+- If the first segments are not all equal, raise `MixedTreeRootError` listing every distinct first segment found. The copy-forward logic (BLD-03) has no correct behaviour in that case and must not guess.
+- **Absolute paths:** any stored path that is absolute (drive letter or UNC) is returned but flagged. An absolute path survives a copy while still pointing back at the original model's folder — a silent failure that would make a "new" run read the old run's data. *(Closes open item #1b.)*
+
+**Acceptance criteria**
+
+1. **Given** the populated APS model, **then** exactly 100 distinct paths are returned and `tree_root_name` returns `TimeSeries`.
+2. **Given** a model whose paths mix `TimeSeries\...` and `Data\...`, **then** `MixedTreeRootError` names both.
+3. **Given** a model containing an absolute path, **then** it is returned flagged, and BLD-01 fails the build on it with that path named.
+4. Stored paths come back byte-identical to what is in `t_text` — no normalisation, no separator swapping.
+
+---
+
+### CDM-07 — Model introspection: scenarios, Read Order, and model attachment
+
+**As** the write path, **I want** to know which scenarios are attached to a given PLEXOS model and what Read Order each carries, **so that** the build's own scenario can be given a Read Order that wins. **[LATE]**
+
+**Type:** Story · **Size:** M · **Traces to:** deliverable §"Writing CSVs as datafiles"; §6.3 · **Depends on:** CDM-05 · **Q5 answered:** `target_model` is per-run and nothing is standard, so resolve it from the Run sheet every time and cache no default.
+
+**Spec**
+
+```python
+def scenarios_on_model(db, model_name: str) -> list[Scenario]   # name, read_order, category
+def max_read_order(db, model_name: str) -> int
+```
+
+- A Scenario's `Read Order` is an **attribute**, read via `t_attribute` / `t_attribute_data`, not a property. Default is 0 when unset. **`[CONFIRM]` — this schema path is inferred, not traced.** `t_attribute` / `t_attribute_data` are not in §2.2's record-by-record traced table list, and this story is the sole foundation of WRT-05 and WRT-06. Verify it against the populated model the same way CDM-03 verifies the view joins, and do it before WRT-05 starts, not alongside it.
+- "Attached to a model" is a membership between the Model object and the Scenario object — only scenarios attached to the target model participate in that model's read ordering, which is why the maximum is taken per-model and not model-wide.
+- Known real values, read directly off `2026 APS_TA V3.1 - Copy.xml` during design (not from either document — re-verify with a query before coding against them): three scenarios at Read Order 1000 and one at 2000. Any implementation that assumes small integers or a dense range is wrong.
+
+**Acceptance criteria**
+
+1. **Given** the populated APS model and a named model object, **then** the scenarios attached to it are returned with their Read Orders, including scenarios with no Read Order set, reported as 0.
+2. **Given** that model, **then** `max_read_order` returns 2000.
+3. **Given** a model with no scenarios attached, **then** `max_read_order` returns 0 and does not raise.
+4. **Given** a model name that does not exist, **then** it raises naming the model and listing the model names that do exist — a typo in `target_model` must not be reported as "no scenarios".
+
+---
+
+### CDM-08 — Model introspection: run horizon
+
+**As** horizon validation, **I want** the start and end of the model's simulation horizon, **so that** a source file that stops short of it can be rejected.
+
+**Type:** Story · **Size:** S · **Traces to:** §8.2; VAL-05 · **Depends on:** CDM-05 · **Q5 answered:** per-run; read the horizon from whichever model the Run sheet names.
+
+**Spec**
+
+```python
+def model_horizon(db, model_name: str) -> tuple[date, date]
+```
+
+- The horizon comes from the Horizon object attached to the named model (`Date From` / `Date To`, or `Date From` + `Step Count` × step type — handle both forms; PLEXOS permits either).
+- Return the resolved concrete dates, not the raw attribute values.
+
+**Why this matters more than it looks.** PLEXOS's `Missing Value Method` defaults to `0` = Last Value, which fills a short data file forward to the end of the horizon **silently**. (Source: PLEXOS's own documentation of the property, reviewed during design. The deliverable is deliberately more cautious — *"this may change as it is discovered how Plexos handles this method"* — so treat the default as established and the exact fill behaviour as worth one confirming test.) A source file covering 2026–2040 against a 2026–2045 model produces a model that runs, reports nothing, and holds five years of flat-lined values. This function is what makes VAL-05 possible, and VAL-05 is a build-stopping error for exactly that reason.
+
+**Acceptance criteria**
+
+1. **Given** APS's real model, **then** the horizon's start and end dates are returned and match what PLEXOS Desktop shows for the same model.
+2. **Given** a horizon expressed as start + step count, **then** the resolved end date is correct for the step type.
+3. **Given** a model with no horizon attached, **then** it raises rather than returning a default range.
+
+---
+
+## EPIC B — Comparison engine
+
+**Component C7.** Phase 2. "What changed?" is four questions, and no single tool answers all of them. Energy Exemplar's tooling covers one level — the numbers inside the CSVs — and the other three are ours.
+
+Desktop's `Create Change Database` looks like the right tool and has no equivalent in `plexos_sdk` (checked against the complete documented method list) or in the Cloud SDK's documented command surface. **Q17 closes the question by decision: if it is not in the SDK, treat it as not existing.** Even a CLI-only subcommand would have covered one of the four levels, not removed the other three, so this epic is built either way.
+
+The engine is one function with no opinion about how it was reached. Both entry points are thin wrappers.
+
+---
+
+### DIFF-01 — `compare()` engine skeleton and folder→model resolution
+
+**As** both entry points, **I want** one comparison function that takes two folder paths, **so that** neither wrapper special-cases the other.
+
+**Type:** Story · **Size:** M · **Traces to:** §10, §10.1 · **Depends on:** CDM-01, CDM-02
+
+**Spec**
+
+```python
+def compare(old_path: Path, new_path: Path,
+            old_model: str | None = None,
+            new_model: str | None = None) -> ComparisonResult
+```
+
+Resolution rules, applied per side:
+
+- Each side is a **folder**, not a `.db` and not an `.xml`. Neither side has to be a run folder — the rule is "find the model in this folder", which an archived run and an ordinary working folder both satisfy. Given that APS's real working model does not live in a run folder, the working-folder case is likely the common one, not the exotic one.
+- **Exactly one `.xml`** → use it.
+- **More than one `.xml`** → use `old_model` / `new_model` if given; otherwise raise asking which. **No convention-based guess** — not newest, not largest, not name-matched. A silently wrong pick produces a confidently wrong report, which is worse than no report.
+- **Zero `.xml`** → raise naming the folder.
+- Both sides' `.db` are generated by `ensure_db(force=True)` every time (CDM-01). Never trust a `.db` found on disk.
+
+`ComparisonResult` holds the four level results plus the two resolved model paths and the generation timestamp, and is the only thing RPT-* consumes.
+
+**Acceptance criteria**
+
+1. **Given** two folders each holding one `.xml`, **when** compared, **then** both `.db` are regenerated and a result returns.
+2. **Given** a folder holding two `.xml` and no model name, **then** it raises listing both filenames.
+3. **Given** a folder holding two `.xml` and the correct name supplied, **then** that model is used.
+4. **Given** a folder holding a `.db` newer than its `.xml`, **then** the `.db` is regenerated anyway and the result reflects the `.xml`.
+5. **Given** an old side that is an archived run and a new side that is a plain working folder, **then** the comparison runs — no run-folder structure is required of either side.
+
+---
+
+### DIFF-02 — Structural diff: memberships added and removed
+
+**As** a modeller, **I want** to see which objects and relationships appeared or disappeared, **so that** structural change is separated from value change.
+
+**Type:** Story · **Size:** S · **Traces to:** §10.2, §10.4 · **Depends on:** CDM-04, DIFF-01
+
+**Spec**
+
+Two comparisons, not one:
+
+1. **Memberships.** FULL OUTER JOIN `old.v_membership` to `new.v_membership` on the full natural key — `(parent_class, parent_object, collection, child_class, child_object)` — returning rows where either side is `NULL`, classified `added` / `removed`.
+2. **Objects.** A separate FULL OUTER JOIN on `(class name, object name)` from `t_object` + `t_class`. §10.2 defines Object as its own record type with its own natural key, and it cannot be derived from the membership diff: **a Data File object is wired in through `t_tag`, not `t_membership`** (§2.2's traced chain), so it has no membership row at all. Since WRT-02 creates one Data File object per new source, deriving objects from memberships would make the pipeline's single most common structural addition invisible at this level.
+
+**Accepted limitation, confirmed as expected:** a renamed object appears as one removal plus one addition, not a rename. Natural-key matching by name cannot detect renames and this schema has no stable identifier to fall back on. Do not build heuristics for it.
+
+**Acceptance criteria**
+
+1. **Given** a model compared against itself, **then** zero structural differences.
+2. **Given** a copy with one generator added, **then** exactly its object add and its membership adds are reported.
+2b. **Given** a copy with one Data File object added and no membership, **then** the object add is reported — the case the membership join cannot see.
+3. **Given** a copy with one generator renamed, **then** one removal and one addition are reported, and the report labels this as the known rename behaviour rather than leaving the reader to infer it.
+4. **Given** two independently-generated `.db` of the same model, **then** zero differences — proving surrogate IDs are not participating in matching.
+
+---
+
+### DIFF-03 — Assignment diff: property values and data-file pointers
+
+**As** a modeller, **I want** to see every property whose value, data file or window changed, **so that** the most common change this pipeline makes is visible at all.
+
+**Type:** Story · **Size:** M · **Traces to:** §10.2, §10.3 · **Depends on:** CDM-05, DIFF-01
+
+**Why this level carries the most weight.** When a property is re-pointed at an updated CSV — by far the most common change this pipeline produces — the model's *structure* is untouched. A membership-level comparison reports nothing at all. Without this level the routine case is invisible. This story is not optional and should not be deferred behind DIFF-02.
+
+**Spec**
+
+FULL OUTER JOIN `old.v_property` to `new.v_property` USING the natural key:
+
+```
+(parent_class, parent_object, collection, child_class, child_object,
+ property, band_id, scenario, date_from, date_to)
+```
+
+Compared payload once matched: `value`, `data_file_path`, `data_file_object`.
+
+Emit rows where either side is `NULL` (`added` / `removed`) or any payload column `IS DISTINCT FROM` its counterpart (`changed`). `IS DISTINCT FROM`, not `<>` — `NULL <> NULL` is `NULL` and would drop exactly the rows where a data file appeared or disappeared.
+
+This reuses the identity definition `plexos_sdk` itself applies for duplicate detection (§7.4): one rule, used for writing and for diffing.
+
+**Acceptance criteria**
+
+1. **Given** a model compared against itself, **then** zero assignment differences.
+2. **Given** a copy in which one property is re-pointed from `hr_A.csv` to `hr_B.csv`, **then** exactly one `changed` row appears, naming both paths, and DIFF-02 reports nothing for it.
+3. **Given** a copy in which a scalar value changed, **then** one `changed` row with old and new values.
+4. **Given** a copy in which a property gained a scenario tag, **then** one removal and one addition (the scenario is part of the key) — and this is documented as expected, not a bug.
+5. **Given** a property that had a data file and now has `NULL`, **then** it is reported — the `IS DISTINCT FROM` case.
+6. **Given** APS's real model against a regenerated copy of itself, **then** zero rows. This is the regression test that proves surrogate keys are excluded.
+
+---
+
+### DIFF-04 — Source-file diff: did the raw inputs change?
+
+**As** a modeller, **I want** to know which source files differ from the ones the baseline run used, **so that** an unexpected model change can be traced to an input before the model is investigated.
+
+**Type:** Story · **Size:** S · **Traces to:** §10.4 (level 1), §11 · **Depends on:** BLD-06
+
+**Spec**
+
+Compares the `Upstream Inputs Referenced/` folders of the two runs. For each file present in either: `added` / `removed` / `changed` / `unchanged`, by SHA-256 over content. No parsing — this level knows nothing about the files' meaning, only whether the bytes differ.
+
+There is **no Energy Exemplar tooling for this level**; it is entirely ours.
+
+Degrades rather than fails: if either side has no archived source folder (a run predating the archive practice, or a plain working folder), report "not available for this side" and continue. The other three levels are unaffected.
+
+**Acceptance criteria**
+
+1. **Given** two runs with identical source folders, **then** every file reports `unchanged`.
+2. **Given** one file with one byte changed, **then** it reports `changed` and nothing else does.
+3. **Given** an old side with no `Upstream Inputs Referenced/`, **then** the level reports unavailable, names why, and the comparison still returns the other three levels.
+
+---
+
+### DIFF-05 — Data diff: the numbers inside the CSVs
+
+**As** a modeller, **I want** per-value differences with error statistics between the two runs' data files, **so that** "the load changed" comes with a magnitude.
+
+**Type:** Story · **Size:** M · **Traces to:** §10.4 · **Depends on:** DIFF-03, Q1
+
+**Spec**
+
+Wraps Energy Exemplar's `TimeSeriesComparison`. **Import `TimeSeriesComparator` as a class and pass `datahub_manager=None`** rather than shelling out to their script — that skips the DataHub upload side effect entirely and avoids their CLI's mandatory `--cli-path` / `--environment` arguments, which their "local" variant still requires even when every input is local.
+
+Pairing: for each property whose `data_file_path` is the same on both sides, compare the file at that path under each run's tree. For a property whose pointer *changed*, DIFF-03 already reported the swap; the data comparison then runs old file vs new file so the swap comes with a magnitude rather than just a rewiring note.
+
+Returns per pair: MAE, RMSE, correlation, max error, mean bias, plus their gap and anomaly flags.
+
+**Acceptance criteria**
+
+1. **Given** two runs with an identical CSV, **then** MAE and max error are 0 and correlation is 1.
+2. **Given** a CSV where one year's values are scaled 1.05×, **then** mean bias is positive and max error matches the largest absolute difference.
+3. **Given** the comparator invoked with `datahub_manager=None`, **then** no network call is attempted — assert this, do not assume it.
+4. **Given** a CSV present on one side only, **then** it is reported as such rather than raising.
+
+---
+
+### DIFF-06 — Diff regression harness
+
+**As** the build team, **I want** the diff proven on a model we broke on purpose, **so that** "nothing changed" means nothing changed.
+
+**Type:** Chore · **Size:** M · **Traces to:** §14 phase 2 · **Depends on:** DIFF-02, DIFF-03
+
+**Why this is a story and not a test file.** This harness is the cheapest correctness check available for the entire pipeline, and it exists before the write path does. A diff that can prove zero differences on an unmodified model is what makes every later story's acceptance test meaningful.
+
+**Spec**
+
+A fixture generator that takes APS's real model and produces mutated copies, one mutation each: add an object; remove an object; rename an object; change a scalar value; re-point a data file; add a scenario tag; change a date window; change a band. Each mutation records its own expected diff. The harness asserts the diff reports **exactly** that and nothing else.
+
+**Acceptance criteria**
+
+1. **Given** the unmutated model against itself, **then** zero differences at every level.
+2. **Given** each mutation, **then** the diff reports exactly the expected change set — no extra rows, no missing rows.
+3. **Given** the `.db` regenerated twice from the same `.xml`, **then** zero differences — the surrogate-key guard.
+4. The harness runs in CI on every change to `v_property`, `v_membership`, or the diff SQL.
+
+---
+
+### DIFF-07 — Standalone entry point
+
+**As** a modeller, **I want** to compare any two models without running a build, **so that** "how does the model I have open differ from the last archived run?" is one action.
+
+**Type:** Story · **Size:** S · **Traces to:** §6.6, §10 · **Depends on:** DIFF-01, WBK-03
+
+**Spec**
+
+Precedence, highest first:
+
+1. Two paths given as command-line arguments.
+2. The Compare sheet's `model_1_path` / `model_2_path` (WBK-03).
+3. Neither — list the run folders found under `output_root` and ask which two.
+
+`model_1` is **always** the baseline, the "before" side. Reversing the two reverses the report: additions become removals. State this on the sheet and in the report header so nobody reads a reversed report as a real change.
+
+**Where the report goes.** Not into either side. A build writes its report into the run it just created, which it owns; a standalone comparison owns neither side, and writing into one would be editing an archived record after the fact. Default is `<output_root>\Comparisons\`, named for both sides and the date.
+
+**Acceptance criteria**
+
+1. **Given** two paths as arguments, **then** those win over whatever the sheet says.
+2. **Given** a filled-in Compare sheet and no arguments, **then** the sheet's paths are used.
+3. **Given** neither, **then** the run folders are listed and the user picks two.
+4. **Given** a run and its baseline compared in both orders, **then** the two reports are mirror images — every `added` in one is `removed` in the other.
+5. **Given** any standalone comparison, **then** nothing is written inside either compared folder.
+
+---
+## EPIC C — Standard Format and file validation
+
+**Components C2 and C5 (checkpoint 1).** Phase 3. Everything upstream of the build converges on one idea: by the time the build script sees a file, it is in Standard Format, and the build **cannot tell** whether that file came from a preprocessor or from a template APS filled in by hand. There is one code path, not two. A filled-in template carries no flag marking it as "new".
+
+---
+
+### FMT-01 — Standard Format reader with inferred granularity
+
+**As** the build, **I want** any Standard-Format CSV read into a uniform structure with its granularity worked out from its own header, **so that** no format or granularity field is needed anywhere in the interface.
+
+**Type:** Story · **Size:** M · **Traces to:** §3.1 · **Depends on:** OPS-01
+
+**Spec**
+
+```python
+def read_standard_format(path: Path) -> StandardFile
+# StandardFile: granularity, time_columns, data_columns, frame, path
+```
+
+Time columns are always a **prefix of** `Year, Month, Day, Period`, in that order:
+
+| Granularity | Time columns |
+|---|---|
+| Annual | `Year` |
+| Monthly | `Year, Month` |
+| Daily | `Year, Month, Day` |
+| Hourly | `Year, Month, Day, Period` |
+
+- `Year` is mandatory. Granularity is inferred from how many of the prefix are present — **never declared**.
+- A header containing `Year, Day` (a gap in the prefix) or `Month, Year` (out of order) is invalid, not a different granularity.
+- Everything after the time columns is a data column. **Leading and trailing whitespace is stripped from every header; interior spacing is preserved exactly** — headers are matched against PLEXOS object names, which contain interior spaces (`Metro to APS`) but never leading or trailing ones. This is the one normalisation in the reader, and it is here rather than in VAL-02 so there is a single place it happens.
+- Confirmed against every `An_` / `yr_` / `mn_` / `hr_`-prefixed CSV in APS's `Generator/`, `Fuels/`, `Emission/` and `Archive/` folders.
+
+**Acceptance criteria**
+
+1. **Given** each of the four valid header shapes, **then** the matching granularity is returned.
+2. **Given** `Year, Day, Value`, **then** it raises naming the invalid prefix and showing the valid ones.
+3. **Given** `Month, Year, Value`, **then** it raises on ordering, not on granularity.
+4. **Given** a file with no `Year`, **then** it raises.
+5. **Given** a header with a trailing blank column (Excel's habit), **then** the blank is dropped, not treated as an unnamed object.
+6. **Given** `hr_RenewableProfile.csv` from APS's real tree, **then** granularity is hourly and every data column header is returned with interior spacing intact and outer whitespace stripped.
+
+---
+
+### FMT-02 — File shape determined by `target_object`, not by column count
+
+**As** the build, **I want** shape decided by whether the Sources row names an object, **so that** a legitimate one-object wide file is never misread.
+
+**Type:** Story · **Size:** S · **Traces to:** §3.2 · **Depends on:** FMT-01, WBK-02
+
+**Spec**
+
+| Shape | Data columns | Object identity comes from |
+|---|---|---|
+| **Wide / shared** | Many; each header is an exact PLEXOS object name | The column headers |
+| **Single-object** | One | The Sources row's `target_object` |
+
+The rule: **`target_object` blank → wide; `target_object` populated → single-object.** In the single-object case the data column's header is ignored entirely.
+
+**Why not infer from structure.** "One data column means single-object" breaks on the real edge case of a wide file that happens to cover exactly one object — a legitimate and likely situation as APS adds resources one at a time. Keying off `target_object` is deterministic in every case and needs no special handling.
+
+**Acceptance criteria**
+
+1. **Given** blank `target_object` and headers `Ocotillo CT01, Ocotillo CT02`, **then** two objects are resolved from the headers.
+2. **Given** `target_object = CH13_Coal` and a column headed `Price`, **then** one object is resolved and the header is ignored.
+3. **Given** blank `target_object` and one data column headed with a real object name, **then** it resolves as wide, to that one object.
+4. **Given** `target_object` populated and **two** data columns, **then** the build fails — a single-object row cannot consume a multi-column file, and quietly taking the first column would be a silent wrong answer.
+
+---
+
+### FMT-03 — Validation checkpoint 1: per-file, structural, before any build work
+
+**As** whoever prepared a file, **I want** to be told everything wrong with it at once and before the build starts doing work, **so that** problems surface next to their cause.
+
+**Type:** Story · **Size:** M · **Traces to:** §8.1, §7.1 step 8 · **Depends on:** FMT-01, FMT-02
+
+**Spec**
+
+Runs against the file alone and needs no model — so **most of it runs in pre-flight, before the run folder exists** (BLD-01 check 11 already resolves every `source_path`, and this checkpoint's rules can run in the same pass). §7.1 places it at step 8 for historical reasons; running it at step 3 is strictly better, because at step 8 the build has already created a run folder and copied a ~121-file tree, which is exactly the half-written state BLD-01 exists to prevent.
+
+**Decide this once and write it into both stories.** Proposed: run the whole rule set in pre-flight; keep step 8 as a no-op assertion that it ran. If anything in the rule set turns out to need the copied tree, that part stays at step 8 and the split is stated explicitly rather than left implicit.
+
+Rules — each returns a structured finding with file, row/column and the offending value:
+
+| # | Rule | Severity |
+|---|---|---|
+| 1 | Header time columns are a valid prefix of `Year, Month, Day, Period`, in order | Error |
+| 2 | At least one data column present | Error |
+| 3 | No duplicate time keys within the file | Error |
+| 4 | Values parse as numeric; no stray text, no blank cells in data columns | Error |
+| 5 | Time coverage is contiguous — no gaps within the file's own range | Error |
+| 6 | Single data column with `target_object` blank | **Warning** |
+
+Rule 6 is a warning rather than an error because it is the one case where a user error (forgetting `target_object`) is silently plausible — the message names both possible readings so the preparer can confirm which was meant.
+
+**All findings for all files are collected and reported together.** The build does not stop at the first bad file. One run, one complete list.
+
+This checkpoint is **build-stopping on any error** (§7.1: "steps 8 and 10 both fail the build"). This is the "bad input data stops the build" half of the standing rule — the half that does *not* get resolved and logged.
+
+**Acceptance criteria**
+
+1. **Given** a file with a blank cell mid-column, **then** an error naming the row, the column header and the time key.
+2. **Given** an hourly file missing 2030-03-14 hour 3, **then** a contiguity error naming that gap.
+3. **Given** a file with 2026 listed twice, **then** a duplicate-key error naming the duplicate.
+4. **Given** three bad files, **then** all three appear in one report and the build stops once, not three times.
+5. **Given** a file with `#N/A` in a data column, **then** a numeric-parse error — not a silent `NaN`.
+6. **Given** a one-column file with blank `target_object`, **then** a warning stating both readings, and the build continues.
+
+---
+
+### FMT-04 — Standard-Format writer
+
+**As** the preprocessors and the build, **I want** one function that writes Standard Format, **so that** every file entering the pipeline is written the same way.
+
+**Type:** Story · **Size:** S · **Traces to:** §3.1, §4 · **Depends on:** FMT-01
+
+**Spec**
+
+```python
+def write_standard_format(frame, path: Path, granularity: Granularity) -> Path
+```
+
+- Writes time columns first, in prefix order, then data columns in the order given.
+- No index column, no BOM, `\r\n` line endings (these land on a Windows file share and get opened in Excel), consistent numeric formatting.
+- **Deterministic:** the same frame written twice produces byte-identical files. This is what makes preprocessor idempotency (PRE-01) and the source-file diff (DIFF-04) meaningful — a file that re-serialises differently every run would show as changed on every run and train everyone to ignore that level.
+
+**Acceptance criteria**
+
+1. **Given** the same frame written twice, **then** the two files are byte-identical.
+2. **Given** a file written by this function, **then** `read_standard_format` reads it back with the same granularity and values.
+3. **Given** a float that is exactly an integer, **then** its written form is stable across runs.
+4. **Given** an object name containing a comma, **then** it is quoted and reads back intact.
+
+---
+
+### FMT-05 — Blank standard templates
+
+**As** APS, **I want** blank CSVs to fill in for data not currently fed into the model at all, **so that** new data needs no code.
+
+**Type:** Story · **Size:** S · **Traces to:** §5 · **Depends on:** FMT-04 · **Q12 answered:** which shapes are needed is not known yet — *"let's have a slew of them."* Build all eight.
+
+**Spec**
+
+Eight shapes maximum — granularity × shape:
+
+```
+template_wide_annual.csv       Year, <Object 1>, <Object 2>, ...
+template_wide_monthly.csv      Year, Month, <Object 1>, ...
+template_wide_daily.csv        Year, Month, Day, <Object 1>, ...
+template_wide_hourly.csv       Year, Month, Day, Period, <Object 1>, ...
+template_single_annual.csv     Year, Value
+template_single_monthly.csv    Year, Month, Value
+template_single_daily.csv      Year, Month, Day, Value
+template_single_hourly.csv     Year, Month, Day, Period, Value
+```
+
+**Build all eight.** Q12: which are actually needed is not known yet — *"let's have a slew of them."* Generate them from one definition rather than hand-maintaining eight files, so a format change touches one place and an unused template costs nothing.
+
+A filled-in template is indistinguishable from preprocessor output downstream: same `source_path` column, same handling, no flag anywhere.
+
+**Acceptance criteria**
+
+1. **Given** all eight templates, **then** each is generated and `read_standard_format` accepts it (as an empty file with a valid header). Q12: build the full set now; an unused template costs nothing and a missing one costs a round trip.
+2. **Given** a template filled with plausible values, **then** checkpoint 1 passes it.
+3. **Given** the hourly templates, **then** the `Period` column's expected range is documented in the file's companion note — 1–24 vs 0–23 is exactly the kind of thing that is obvious to whoever wrote it and to nobody else.
+
+---
+
+## EPIC D — Sources workbook
+
+**Component C3.** Phase 4. Three sheets. The first two drive the build; the third drives the standalone comparison and is not read by the build at all.
+
+---
+
+### WBK-01 — Run sheet reader
+
+**As** the build, **I want** the run's identity and starting point from one small key/value sheet, **so that** per-run settings cannot disagree with each other.
+
+**Type:** Story · **Size:** S · **Traces to:** §6.1 · **Depends on:** OPS-01, **WBK-04** · **Q2 / Q18 answered:** the workbook runs everything and is the source of truth; every option gets a Run sheet cell, `scenario_name` included.
+
+**Spec**
+
+```python
+@dataclass
+class RunConfig:
+    run_name: str            # required
+    output_root: Path        # required
+    source_model: Path       # required — full path to the .xml copied as the starting point
+    source_timeseries: Path | None   # blank → inferred (§6.1.1)
+    target_model: str        # required — the PLEXOS model being built  [LATE]
+    compare_to: Path | None  # blank → the run source_model came from; none → diff skipped
+    source_root: Path        # required — what source_path on the Data sheet is relative to
+    scenario_name: str       # default "Automated Inputs" — the scenario the build writes into  [LATE]
+    diff_threshold: float    # default 0.005 — below this, changes are counted not listed (RPT-04)
+```
+
+**Why a separate sheet.** A per-run value cannot live on the Data sheet — the run's name would have to be repeated on every row, which lets two rows disagree about what run they belong to and makes the build's first job reconciling its own configuration.
+
+**Why `source_model` is a path and not the name of a run.** An earlier draft had one `baseline_run` field doing both jobs. They are not the same, for a structural reason: **APS has no run folders today.** Per-run archiving is part of what this engagement proposes, so on the first build there is by definition no run folder for the starting model to live in — APS's real working model sits in an ordinary working folder. Requiring a run folder would make the first build impossible.
+
+- `scenario_name` is the field that makes the deliverable's *"default, can be changed"* true. It is not on the example workbook's Run sheet yet — **WBK-04 adds it**. Q18 settles where it goes: *"Everything should live in the run sheet cell."*
+- `diff_threshold: float` joins it for the same reason (RPT-04). The general rule from §2.2: if it changes what the build does or what the report says, it is a cell.
+- Key matching is case-insensitive and whitespace-trimmed; unknown keys are an error naming the key and listing the valid ones (a typo must not read as "not set").
+- `source_timeseries` blank is *not* an error — it is inferred by BLD-01.
+- `compare_to` blank is *not* an error — it means "the run `source_model` came from", and if it did not come from a run folder the build skips the diff and says so. That is the expected first-run case.
+
+**Acceptance criteria**
+
+1. **Given** the example workbook's Run sheet, **then** a `RunConfig` is returned with every field populated as typed.
+2. **Given** a missing required key, **then** an error naming it.
+3. **Given** `Run_Name` with different casing, **then** it is accepted.
+4. **Given** an unknown key `souce_model`, **then** an error naming it and listing the valid keys.
+5. **Given** blank `source_timeseries` and blank `compare_to`, **then** both are `None` and no error is raised.
+6. **Given** blank `scenario_name` and blank `diff_threshold`, **then** the documented defaults apply and the build report's run header states that they were defaulted rather than typed.
+
+---
+
+### WBK-02 — Data sheet reader
+
+**As** the build, **I want** one row per source file saying where its values belong in PLEXOS, **so that** mapping needs no code.
+
+**Type:** Story · **Size:** S · **Traces to:** §6.2 · **Depends on:** WBK-04, WBK-01 · **Q8 answered:** class + collection is always enough to disambiguate a property. The four name columns are a complete key.
+
+**Spec**
+
+| Column | Required | Meaning |
+|---|---|---|
+| `source_path` | Yes | Path to the Standard-Format file, **relative to `source_root`**. Preprocessor output and filled-in template are treated identically. |
+| `target_class` | Yes | PLEXOS class name, e.g. `Generator` |
+| `target_collection` | Yes | PLEXOS collection name, e.g. `Generators` |
+| `target_property` | Yes | PLEXOS property name, e.g. `Max Capacity` |
+| `target_object` | Conditional | Populated for single-object files, blank for wide (§3.2 / FMT-02) |
+| `target_folder` | No | Where the CSV goes inside the data-file tree. Blank → `APS_Inputs` (WRT-03, Q6) |
+| `notes` | No | Free text, ignored by the build |
+
+Class, collection and property are **plain names**, resolved against the live model at build time using the same lookup pattern EE's own `ReplaceModelInputFiles` uses. Numeric IDs never appear in the interface.
+
+**Deliberately absent, and each absence is a decision:** no format or granularity column (§3.1 — self-describing); no run-selection sheet (every row is always active); no source registry; no object or property catalog (existence is validated against the live model itself).
+
+**Not on the sheet but present in the internal signature:** `band_id` and `scenario_tag`, defaulting to band 1 and the build's own scenario. The general rule — **full signature internally, minimal surface on the sheet** — makes adding a column later an additive change rather than a rebuild.
+
+**Acceptance criteria**
+
+1. **Given** the example workbook's ten rows, **then** ten `SourceRow` objects are returned with fields as typed.
+1b. **Given** a blank `target_folder`, **then** it resolves to `APS_Inputs` rather than to `None` — the default is applied at read time so nothing downstream has to know it.
+2. **Given** a row missing `target_property`, **then** an error naming the sheet row number.
+3. **Given** a blank row in the middle of the table, **then** it is skipped, not read as a row of empty strings.
+4. **Given** a row whose `notes` contains a comma and a line break, **then** it is read intact and ignored by the build.
+5. **Given** trailing whitespace on `target_class`, **then** it is trimmed — an invisible space must not produce "class not found".
+
+---
+
+### WBK-03 — Compare sheet reader
+
+**As** the standalone comparison, **I want** its two paths and its output location from the workbook, **so that** pasting a Windows path with spaces into a cell beats quoting it on a command line.
+
+**Type:** Story · **Size:** S · **Traces to:** §6.6 · **Depends on:** WBK-04, WBK-01
+
+**Spec**
+
+| Setting | Required | Meaning |
+|---|---|---|
+| `model_1_path` | Yes | The baseline — the "before" side |
+| `model_2_path` | Yes | The side being compared against it |
+| `output_report_path` | No | Blank → `<output_root>\Comparisons\` |
+
+Each side may be a run folder or any folder holding a model. A bare name resolves against `output_root`; a full path is taken as-is. Disambiguation when a folder holds several `.xml` is DIFF-01's job.
+
+**One wrinkle that must be stated, not just known.** The workbook is archived with each build as provenance (§12), so an archived copy carries whatever was last typed on this sheet — which has nothing to do with that build. Harmless, but it means the Compare sheet is **scratch space, not part of the run record**. RPT-02 states this in every build report so nobody reads an archived Compare sheet as a statement about that run.
+
+**Acceptance criteria**
+
+1. **Given** the example workbook's Compare sheet, **then** both paths and the output path are returned.
+2. **Given** a bare folder name in `model_1_path`, **then** it resolves under `output_root`.
+3. **Given** a blank `output_report_path`, **then** it defaults to `<output_root>\Comparisons\`.
+4. **Given** a build run, **then** the Compare sheet is not read at all — assert this, so the two paths cannot accidentally become coupled.
+
+---
+
+### WBK-04 — Reconcile the workbook schema across the design doc, the deliverable and the example file
+
+**As** the build team, **I want** one authoritative field list, **so that** three documents do not describe three interfaces.
+
+**Type:** Chore · **Size:** S · **Traces to:** §6.1, §6.6; example workbook · **Depends on:** — · **Q13 answered:** there is no existing driver workbook and no existing infrastructure — nothing to coexist with.
+
+**This runs first in its epic.** WBK-01 … WBK-03 are written against its output, so it cannot be the thing that cleans up after them.
+
+**The actual discrepancies**, which will otherwise be discovered in code review:
+
+| Field | Technical design §6.1/§6.6 | Example workbook | Resolution needed |
+|---|---|---|---|
+| Run sheet | has `compare_to`, `source_root`; no `target_model` | has `target_model`; no `compare_to`, no `source_root` | `target_model` is required by the scenario work **[LATE]** and must be added to the design. `compare_to` and `source_root` must be added to the workbook, or dropped with a stated reason. |
+| Compare sheet | `old_run` / `new_run` / `old_model` / `new_model` / `report_output` | `model_1_path` / `model_2_path` / `output_report_path` | The workbook's names are the ones APS has seen. Adopt them; keep `old_model` / `new_model` as optional additions for the multi-`.xml` case. |
+| Sheet name | "Sources" | "Data" | Pick one. The deliverable and the example workbook both say **Data**. |
+| Compare sheet | §6.6 describes it as the workbook's third sheet | present as a third sheet | The deliverable's *Sources workbook* section documents only Sheet 1 and Sheet 2, and puts the comparison settings in a separate *Running a comparison* section. Say "three sheets" in the deliverable, or say plainly that the third is not part of the build's input. |
+| `scenario_name` | absent | absent | **Add it as a Run sheet row.** Q18: *"Everything should live in the run sheet cell."* |
+| `target_folder` | absent | absent | **Add it as an optional Data sheet column.** Blank → `APS_Inputs`. Q6, closed — build it. |
+| Diff threshold | absent | absent | **Add it as a Run sheet row** (RPT-04). Per §2.2, a setting that changes the report belongs on the sheet, not only behind a flag. |
+| Read Order value | absent | — | The deliverable says the build sets the scenario's Read Order "one above the maximum — **normally 9999**", and also that the highest existing is 2000. Both cannot hold: max+1 gives **2001**. The rule is right; the illustrative number is wrong. Fix the deliverable. |
+| Data file naming | §7.2.1 keeps the source filename | rows use `An_`, `hr_`, `mn_`, `dy_` | The deliverable mandates `<resolution>_<source stem>.csv` with `yr_` for annual; APS's real tree and the example workbook use `An_`. Settle one prefix vocabulary and fix whichever document is wrong. |
+| Archived source folder | `Upstream Inputs Referenced\` (§12) | — | The deliverable's run-folder figure calls it `Copy of Source Data/`. APS has seen that name in a figure and will look for it on disk. Pick one and change the other. |
+
+**Q13 is closed and it removes work rather than adding it:** there is no existing driver workbook and no existing infrastructure — today it is the PLEXOS interface and files made by hand. So this workbook coexists with nothing and inherits no filename.
+
+**One consequence to carry into the documents:** `Input Creation Driver.xlsx` appears in §12 of the technical design and in the deliverable's run-folder figure. It names a file that does not exist. Take it out of both and use `Sources_Workbook.xlsx` throughout.
+
+**Acceptance criteria**
+
+1. One field list exists, in the technical design, and the deliverable and example workbook are updated to match it.
+2. Every renamed field is renamed everywhere in one commit — no compatibility shims for names APS has never used in anger.
+3. WBK-01 … WBK-03 are written against the reconciled list, not against any one document.
+
+---
+
+### WBK-05 — Workbook validation and error reporting
+
+**As** whoever fills in the workbook, **I want** every problem with it reported at once, with cell references, **so that** fixing it is one pass rather than one error per run attempt.
+
+**Type:** Story · **Size:** M · **Traces to:** §7.1.1 · **Depends on:** WBK-01, WBK-02, WBK-03, FMT-01
+
+**Spec**
+
+A `WorkbookFindings` collector that gathers everything and raises once at the end of reading, never at the first problem. Each finding carries sheet, cell (`Data!C14`), the offending value, and what was expected.
+
+**Three layers, and each check belongs to exactly one.** Workbook structure and self-consistency here; anything needing the source *file* is FMT-03; anything needing the *model* is VAL-*. A check that appears in two layers gets two error messages for one problem, which is how a user ends up fixing the same thing twice.
+
+Checks at this layer:
+
+- Required keys and columns present.
+- Paths are syntactically valid Windows paths; `run_name` has no reserved characters and is not a reserved device name.
+- `source_path` values are unique across rows (the same file mapped twice is almost certainly a copy-paste error; if it is deliberate it is expressed as two different target rows, which is fine — so this is a **warning** naming both rows).
+- No row where every field is blank except `notes`.
+
+**Not here:** `target_object` populated on a row whose file has several data columns. That needs the CSV read, so it belongs to FMT-02/FMT-03 and is owned there.
+
+**Acceptance criteria**
+
+1. **Given** a workbook with five separate problems, **then** all five appear in one message, each with a cell reference.
+2. **Given** `run_name = CWP 12/20/2026`, **then** an error naming the invalid character.
+3. **Given** the same `source_path` on two rows targeting the same property, **then** a warning naming both rows.
+4. **Given** a clean workbook, **then** nothing is raised and nothing is printed.
+5. **Given** the full check list, **then** no check here reads a source CSV or the model — assert by running this layer with `source_root` pointing at an empty folder and no model available.
+
+---
+
+### WBK-06 — CLI overrides for run settings
+
+**As** anyone scripting a build, **I want** to override Run sheet values from the command line, **so that** the workbook is not the only way in.
+
+**Type:** Story · **Size:** S · **Traces to:** §6.1.1 · **Depends on:** WBK-01 · **Q2 answered:** the workbook runs everything. This story is a convenience on top of the sheet, not a second interface — see §2.2.
+
+**Spec**
+
+**Read §2.2 first.** Q2 settled that the workbook runs everything and is the source of truth. This story is a convenience on top of the sheet, not a second way in — **no option may exist only here**, and a new setting gets its Run sheet cell before it gets a flag.
+
+Every Run sheet setting has a matching flag: `--run-name`, `--output-root`, `--source-model`, `--source-timeseries`, `--target-model`, `--compare-to`, `--source-root`, `--scenario-name`. CLI wins over the sheet.
+
+**Two things are CLI-only and must never become cells:**
+
+- `--force`, which permits writing into an existing run folder. A destructive action must not be something someone can leave switched on from last time.
+- `--dry-run`, which runs pre-flight and both validation checkpoints and then stops without creating anything.
+
+**The provenance cost of overrides, which must be handled and not just noted.** The archived workbook is meant to be a complete record of what produced a run (§12), and Q2 makes that its primary job. An override makes the archived sheet a lie about its own run. So: **every override is recorded in the build report's run header**, showing the sheet value beside the value actually used. Under §2.1 this is not optional housekeeping — an override is invisible to every diff level, so if the report does not say it, nothing does.
+
+**Acceptance criteria**
+
+1. **Given** `--run-name X` and `run_name = Y` on the sheet, **then** the run folder is `X`.
+2. **Given** any override, **then** the build report names the setting, the sheet value and the used value.
+3. **Given** `--force` present in the workbook as a cell, **then** it is rejected as an unknown key (WBK-01 case 4).
+4. **Given** `--dry-run`, **then** pre-flight and both checkpoints run, findings are reported, and `output_root` is unchanged on disk.
+
+---
+## EPIC E — Build orchestration
+
+**Component C4.** Phase 5. The build never edits a model in place. It copies a model *and its whole data-file tree* into a new run folder, writes into the copy, compares the result against its baseline, and archives every part of what it used.
+
+---
+
+### BLD-01 — Pre-flight checks
+
+**As** whoever starts a build, **I want** a misconfigured run to fail in a second with an empty disk, **so that** I am not cleaning up a half-written run folder.
+
+**Type:** Story · **Size:** M · **Traces to:** §7.1.1 · **Depends on:** WBK-05, CDM-06
+
+**Spec**
+
+Everything checkable before a single file is created, checked there. All findings collected and reported **together**, never one per run attempt.
+
+| # | Check | On failure |
+|---|---|---|
+| 1 | `output_root` exists and is writable | Error |
+| 2 | `output_root\run_name` does **not** exist | Error, unless `--force` |
+| 3 | `run_name` is a valid Windows folder name — no reserved characters, not a reserved device name, and within path-length limits **once the deepest data-file path is appended** | Error |
+| 4 | `source_model` exists and is readable | Error |
+| 5 | **Every data-file path the source model references resolves under `source_timeseries`** | Error, listing every missing file with its stored path |
+| 6 | `source_timeseries`, when blank, is inferred as the folder beside `source_model` whose name matches `tree_root_name(db)` | Error naming the folder that was expected |
+| 7 | No stored data-file path is absolute (CDM-06) | **See note below** |
+| 8 | Free space at `output_root` exceeds the size of the tree about to be copied | Error |
+| 9 | `compare_to`, if named, exists and contains a model | Error |
+| 10 | `compare_to` blank **and** `source_model` did not come from a run folder | **Note, not error** — the diff will be skipped; this is the expected first-run case |
+| 11 | `source_root` exists, and every `source_path` on the Data sheet resolves under it | Error, listing every missing file at once |
+| 12 | `target_model` exists in the source model | Error listing the model names that do exist |
+
+**Check 3 is less generous than it looks.** APS's real paths already run to `TimeSeries\Generator\An_NameplateCapacity_2026_Q1_Enhanced_Transmission_STP.csv`. Adding `output_root\run_name\Inputs\` in front of that eats the headroom fast, and Windows fails a 260-character path with an error nobody traces back to the run name.
+
+**Check 7 needs a decision before it is coded.** An absolute stored path is a *model* condition — something already in APS's model — not malformed input someone typed, so the standing rule points at "resolve and log", not "stop". But an absolute path survives a copy while still pointing back at the original model's folder, so the new run would silently read the old run's data. Proposed: **fail the build only if the absolute path resolves outside the run folder**, log it otherwise, and find out first whether any exist at all (CDM-06 flags them; run it against the real model before this story is sized). Do not ship a rule that stops every build on APS's real model over a legacy path nobody has looked at yet.
+
+**Check 5 is the one that matters most.** A model whose tree is missing still opens in PLEXOS Desktop and simply reads nothing. The failure is silent, which is exactly why it is checked up front rather than discovered in Desktop three days later.
+
+**Acceptance criteria**
+
+1. **Given** a run folder that already exists, **then** the build fails before creating anything, and `--force` is named in the message as the way past it.
+2. **Given** a source model whose tree is missing 12 files, **then** all 12 are listed with their stored paths, in one message.
+3. **Given** a `run_name` that pushes the deepest path past the limit, **then** an error naming that deepest path and its length.
+4. **Given** blank `source_timeseries` and a folder named `TimeSeries` beside the model, **then** it is inferred and the build proceeds.
+5. **Given** blank `source_timeseries` and no such folder, **then** an error naming `TimeSeries` as the expected folder name.
+6. **Given** blank `compare_to` and a source model in a plain working folder, **then** a note is recorded, the diff is skipped, and **the build proceeds** — this is not a failure.
+7. **Given** four separate pre-flight failures, **then** all four are reported in one message and `output_root` is untouched.
+
+---
+
+### BLD-02 — Create the run folder
+
+**As** the archive, **I want** a run folder created to a fixed shape, refused if it already exists, **so that** a run is never written over.
+
+**Type:** Story · **Size:** S · **Traces to:** §12, §6.1 · **Depends on:** BLD-01 · **Q3 / Q14 answered:** accept any folder name, no pattern enforcement; APS will adopt per-run archiving and the layout as proposed.
+
+**Spec**
+
+```
+<output_root>\<run_name>\                  e.g. CWP 12202026
+    Inputs\
+        <model>.xml
+        <model>.db
+        <tree>\                            named as the model's own paths expect
+        Sources_Workbook.xlsx          the workbook that produced this run
+        Upstream Inputs Referenced\     WBK-04: the deliverable calls this
+                                       "Copy of Source Data" — pick one
+        build_report.txt               plain text — what the build decided (RPT-01)
+        diff_report.xlsx               workbook — what changed (RPT-02, RPT-03)
+    Outputs\                               created empty; outside this milestone
+```
+
+- Refuses an existing `output_root\run_name`. `--force` is the only override and is CLI-only.
+- **Q3 is closed: accept any valid folder name.** No pattern check, no naming convention, and **no warning** — a warning on a name APS deliberately chose is noise, and noise in a report is how the signal in it stops being read. The only constraints on `run_name` are the Windows ones in BLD-01 check 3.
+
+**This layout is new, and APS has agreed to it.** They have no per-run archive today — an earlier draft read a mock-up folder on a connected drive as evidence of one, which was wrong — so the run folder, the `Inputs`/`Outputs` split and the run naming are all things this engagement asked them to adopt. **Q14: yes to both, the practice and the layout.**
+
+That matters more than a formatting agreement, because §10's whole comparison capability rests on it: no archive, no baseline, no diff. The first build still has nothing to compare against and says so; value begins at the second run.
+
+**Acceptance criteria**
+
+1. **Given** a clean `output_root`, **then** the full skeleton is created with `Outputs\` present and empty.
+2. **Given** an existing run folder and no `--force`, **then** nothing is created and the build fails.
+3. **Given** `--force`, **then** the build proceeds and the build report's run header records that an existing folder was overwritten — §2.1: no diff level would ever show it.
+3b. **Given** a `run_name` of `Q4 rerun (Ben's copy)`, **then** it is accepted without comment. Q3: any valid folder name, no pattern, no warning.
+4. **Given** a build that fails at any later step, **then** the partially-created run folder is left in place with the failure recorded in it — not silently deleted, since the partial state is evidence.
+
+---
+
+### BLD-03 — Copy the model and its whole data-file tree forward
+
+**As** the build, **I want** the entire source tree copied before anything is written, **so that** the ~95 links this run does not touch still resolve.
+
+**Type:** Story · **Size:** M · **Traces to:** §6.1.1 · **Depends on:** BLD-02, CDM-06 · **Q4 answered:** any model can be the starting point — *"don't assume anything from this model."* See §2.1.
+
+**This is the part an earlier draft got wrong, and it is worth being precise about.** Data File paths inside a PLEXOS model are stored **relative to the model file's own folder**. APS's populated model stores 100 distinct paths of this shape:
+
+```
+TimeSeries\Generator\An_FOM.csv
+TimeSeries\Fuels\mn_FuelPrices.csv
+TimeSeries\Emission\yr_EmissionsPrice.csv
+```
+
+A typical run touches a handful of properties. Copying only the `.xml` and writing the workbook's few CSVs would leave the other ~95 links pointing at files that do not exist in the new run folder — and the model would still open, and still read nothing.
+
+**Spec**
+
+1. Copy `source_model` into `Inputs\`, keeping its filename or applying the run's naming convention (Q4 / Q3).
+2. Copy the **entire** `source_timeseries` tree into `Inputs\`, preserving subfolder structure, **into a folder named exactly `tree_root_name(db)`**.
+3. Never modify anything under `source_model`'s original folder. The source is read-only for the whole build.
+
+**Three rules, each of which has already bitten once:**
+
+- **Copy forward, change what differs.** The whole tree first; then overwrite or add only what the Data sheet names.
+- **The destination folder name is not free.** Stored paths begin with a literal folder name, so the copy must land in a folder called exactly that. The build does not hardcode `TimeSeries` — it reads the model's own paths and takes their common first segment. Self-checking, and it survives a model using a different convention.
+- **Never run-stamp that folder.** A draft layout named it `Timeseries _ CWP 09022026` — a stamped name no relative path could resolve against. The run stamp goes on the run folder *above* it, which is where it is useful anyway.
+
+**Orphans.** APS's tree holds 121 CSVs of which the model references 100. The 21 orphans are harmless to carry forward, but BLD-07 counts them — an orphan is usually either a file someone forgot to wire up or a leftover from a link that moved.
+
+**Acceptance criteria**
+
+1. **Given** APS's real model and tree, **when** copied, **then** all 121 files land under `Inputs\TimeSeries\` with subfolders preserved.
+2. **Given** the copied model, **then** all 100 stored paths resolve against the new location.
+3. **Given** a model whose `tree_root_name` is `Data`, **then** the destination folder is named `Data`, not `TimeSeries`.
+4. **Given** a completed copy, **then** the source folder's files have unchanged mtimes — nothing was written there.
+5. **Given** a copy interrupted mid-way, **then** the run fails and the partial folder is left with the failure recorded, not silently reused on a retry.
+
+---
+
+### BLD-04 — Build driver: the run sequence
+
+**As** the build team, **I want** the nineteen steps expressed as one readable sequence with explicit failure semantics, **so that** the order is in one place rather than distributed through the code.
+
+**Type:** Story · **Size:** L · **Traces to:** §7.1 · **Depends on:** BLD-01…03, WRT-01…08, VAL-01…06
+
+**Spec**
+
+```
+ 1. Read Run sheet                              WBK-01
+ 2. Read source model's stored data-file paths   CDM-06
+ 3. PRE-FLIGHT CHECKS                            BLD-01   — before anything is created
+ 4. Create output_root\run_name\Inputs\          BLD-02
+ 5. Read Data sheet                              WBK-02
+ 6. Copy source .xml AND its whole tree          BLD-03   — never edit the source in place
+ 7. xml_to_db(new_run.xml, new_run.db)           CDM-01
+ 8. VALIDATION CHECKPOINT 1 (structural)         FMT-03   — FAILS THE BUILD
+ 9. Resolve every target against the .db         WRT-01
+10. VALIDATION CHECKPOINT 2 (semantic)           VAL-*    — FAILS THE BUILD
+11. Create / clear the build scenario            WRT-05   [LATE]
+12. Write each Data file into the tree           WRT-03
+13. For each row: write the Datafile link        WRT-04, WRT-07, WRT-08
+14. sdk.validate()                               VAL-06
+15. db_to_xml(new_run.db, new_run.xml)
+16. Re-check every data-file path resolves       BLD-05
+17. Run diff vs compare_to                       DIFF-01
+18. Emit build report (flat) + diff report      RPT-01, RPT-02, RPT-03
+19. Archive workbook + source files              BLD-06
+```
+
+**Failure semantics, and they are not uniform:**
+
+- Steps 8 and 10 **fail the build**. A build that produces a model nobody can trust is worse than no build.
+- Every model condition the build can resolve — a Read Order to choose, a variable to carry, a data file already present, a file to place — is resolved, recorded in the exception ledger (BLD-08), and the run continues.
+- All writes (steps 11–13) are wrapped in **one `sdk.transaction()` per run**, so a failure leaves no partial model.
+- Step 17 failing does **not** fail the build. The model is already built and valid; a diff that could not run is reported as such.
+
+**Acceptance criteria**
+
+1. **Given** a checkpoint-1 error, **then** the build stops in pre-flight (FMT-03), nothing is created under `output_root`, and the findings are reported to the console and written to a findings file beside the workbook.
+2. **Given** a failure inside step 13, **then** the transaction rolls back and the `.db` holds no partial writes.
+3. **Given** a `compare_to` that cannot be resolved, **then** steps 1–16 complete, the build report is written, no diff workbook is produced, and the build report's outcome line says why — an empty diff workbook would read as "nothing changed".
+4. **Given** a clean run against APS's real model, **then** all nineteen steps complete and the run folder matches BLD-02's layout exactly.
+5. Each step logs its start, end and duration — a build that takes twenty minutes needs to say where they went.
+
+---
+
+### BLD-05 — Post-build path re-check
+
+**As** the build, **I want** every data-file path re-verified against the finished model, **so that** a file written somewhere other than where its link points is caught here and not in Desktop.
+
+**Type:** Story · **Size:** S · **Traces to:** §7.1 step 15 · **Depends on:** BLD-03, CDM-06 · **Wired into the build sequence by:** BLD-04 (sprint 7)
+
+**Spec**
+
+Re-run check 5 of pre-flight, this time against `new_run.xml` and the run's own tree.
+
+**Build it in sprint 4 against the copied model** — at that point the copy exists (BLD-03) even though nothing has been written into it, which is enough to exercise and test the check. Wiring it into the build sequence as step 16 happens with BLD-04 in sprint 7. Cheap, and it catches **the one failure mode that would otherwise produce a model that opens fine and reads nothing**: a Data File whose `t_text` path does not match where the CSV actually landed.
+
+Any failure here is a **build error**, not a warning. The model is wrong.
+
+**Acceptance criteria**
+
+1. **Given** a clean build, **then** every stored path resolves and the count matches the pre-flight count plus any newly added files.
+2. **Given** a deliberately corrupted link (path edited to a file that does not exist), **then** the build fails naming that path and the property that points at it.
+3. **Given** a newly-created Data File, **then** its stored path resolves — the new-file case is the one most likely to be wrong.
+
+---
+
+### BLD-06 — Archive the workbook and the source files
+
+**As** anyone opening an archived run a year later, **I want** the run to describe itself, **so that** its provenance is in the folder rather than in someone's memory.
+
+**Type:** Story · **Size:** S · **Traces to:** §12, §6.1.1 · **Depends on:** BLD-02 · **Q13 / Q14 answered:** archiving adopted; no existing driver workbook to reconcile with.
+
+**Spec**
+
+- Copy the workbook itself into `Inputs\Sources_Workbook.xlsx`. Its Run and Data sheets are the record; its Compare sheet is scratch (WBK-03) and the report says so.
+- Copy every file named on the Data sheet into `Inputs\Upstream Inputs Referenced\`, preserving relative structure under `source_root`. This is what DIFF-04 compares against on the next run.
+- The `.xml`, the `.db` and the tree are already there from the build; retaining them is a matter of **not deleting them**, not extra work.
+
+**Why the workbook rather than command-line arguments carries the run's identity.** Both work, and the build accepts CLI overrides (WBK-06). But the workbook is archived with the run, so putting the run's identity and baseline in it makes the archived workbook a complete record of what produced that model — open any archived run and its provenance is right there. Arguments lose that unless separately logged, which is why WBK-06 logs them.
+
+**Acceptance criteria**
+
+1. **Given** a completed build, **then** the workbook and every source file named on the Data sheet are present under `Inputs\`.
+2. **Given** two source files with the same basename in different folders under `source_root`, **then** both are archived without collision.
+3. **Given** an archived run, **then** re-reading its archived workbook reproduces the `RunConfig` that built it, except for any CLI overrides — which the report names.
+
+---
+
+### BLD-07 — Orphan data-file count
+
+**As** a modeller, **I want** to know how many CSVs in the tree nothing points at, **so that** a file someone forgot to wire up surfaces.
+
+**Type:** Story · **Size:** S · **Traces to:** §6.1.1 · **Depends on:** BLD-03, CDM-06
+
+**Spec**
+
+Set difference between files present under the tree and paths referenced by `v_property`. Reported as a count in the build report's counts section, with the full list beneath it. **Informational, never an error** — carrying orphans forward is harmless.
+
+**Acceptance criteria**
+
+1. **Given** APS's real tree, **then** 21 orphans are reported (121 present, 100 referenced).
+2. **Given** a build that adds a CSV and wires it up, **then** the orphan count is unchanged.
+3. **Given** a build that writes a CSV whose link then fails to be created, **then** the orphan count rises — and this is the signal BLD-05 is meant to catch first.
+
+---
+
+### BLD-08 — Exception and assumption ledger
+
+**As** a modeller reviewing a run that completed without interruption, **I want** every decision the build made for itself, **so that** "it ran clean" is something I can check rather than trust.
+
+**Type:** Story · **Size:** M · **Traces to:** deliverable §"The build report" · **Depends on:** BLD-04 · **[LATE]**
+
+**Spec**
+
+A structured ledger collected through the run and handed to **the build report** (RPT-01, section 3) — not to the diff workbook, which by §2.1 is precisely where this content would be invisible.
+
+Each entry: category, what the build met, what it did, why, and where (object / property / file / sheet row).
+
+**Categories, each one a real case:**
+
+| Category | Example entry |
+|---|---|
+| Read Order chosen | *Set scenario `Automated Inputs` Read Order to 2001; highest existing on model `TA_Base2_ST` was 2000.* |
+| Variable carried across | *Copied `Battery Derate` from the existing link onto the new link for `Max Power` on 14 batteries. Whether it should apply to the new data is a modelling question — see Q10.* |
+| Data file placement | *Placed `hr_Load_2026Q1_LRF.csv` at `TimeSeries\Region\` — new Data File object, no existing path to preserve.* |
+| Existing data file reused | *Overwrote `TimeSeries\Generator\hr_RenewableProfile.csv` in place; link unchanged.* |
+| Diff skipped | *No `compare_to` and source model not from a run folder. First-run case.* |
+| Override applied | *`run_name` taken from `--run-name` (`CWP 12212026`); sheet said `CWP 12202026`.* |
+| Warning carried | *Checkpoint-1 warning: `An_CoalPrice.csv` has one data column and blank `target_object` — read as single-object.* |
+
+**This is the "the run must go on" half of the standing rule made auditable.** The build does not stop when it meets a condition it can resolve on its own; the ledger is what stops that from being the same as hiding it. A run that completed without interruption can still be reviewed for the decisions behind it.
+
+**Acceptance criteria**
+
+1. **Given** a build that resolves a Read Order, carries a variable and places a new file, **then** all three appear as ledger entries with object and property named.
+2. **Given** a build with nothing to resolve, **then** the ledger is empty and the report says so explicitly rather than omitting the section.
+3. **Given** any ledger entry, **then** it names a location specific enough to navigate to — an object name, a file path or a sheet cell.
+4. **Given** a build that failed, **then** the ledger up to the failure point is still written.
+
+---
+
+## EPIC F — PLEXOS write path
+
+**Component C4.** Phase 5–6. The foundation this epic rests on, traced record-by-record against APS's real model: **a property does not hold a value directly.** Time-varying data reaches PLEXOS through a Data File — a CSV on disk, plus a Data File object inside the model that points at it, plus a link from the target property to that Data File object. Writing data is therefore always two operations.
+
+Sprint 6 in particular is where the **[LATE]** scenario decisions live. They are not in the technical design doc yet; they are in the v4 deliverable and in this backlog.
+
+---
+
+### WRT-01 — Resolve class, collection, property and object by name
+
+**As** the build, **I want** plain names resolved against the live model, **so that** the workbook never carries a numeric ID.
+
+**Type:** Story · **Size:** M · **Traces to:** §2.4, §6.5 · **Depends on:** CDM-05, WBK-02 · **Q8 answered: yes** — class + collection always disambiguates.
+
+**Spec**
+
+```python
+def resolve_target(db, target_class, target_collection, target_property) -> ResolvedTarget
+def resolve_object(db, class_name, object_name) -> Object
+```
+
+Uses the same lookup pattern EE's `ReplaceModelInputFiles` uses: `t_class` / `t_collection` / `t_property` name queries returning `lang_id`.
+
+**Q8 is closed: yes, always sufficient.** The SDK resolves a property name within a collection, and the collection by name; where a property name exists on several collections, `parent_class_lang_id` disambiguates, and `target_class` + `target_collection` supplies it. The four name columns are a complete key — no fifth column, no change to WBK-02. Keep the "more than one match" error path anyway (VAL-01): it should now be unreachable, and an unreachable error that fires is the cheapest possible signal that an assumption broke.
+
+**Acceptance criteria**
+
+1. **Given** `Generator` / `Generators` / `Max Capacity`, **then** exactly one property resolves.
+2. **Given** a property name that exists on two collections and a `target_collection` naming one, **then** the right one resolves.
+3. **Given** a name that resolves to more than one match, **then** it raises listing every match with its parent class — never picks the first.
+4. **Given** a misspelled class, **then** it raises listing the closest real class names. A build that stops on a typo should say which typo.
+5. **Given** every row in the example workbook against APS's real model, **then** all ten resolve.
+
+---
+
+### WRT-02 — Ensure the Data File object exists, deterministically named
+
+**As** the build, **I want** the same Data File object found and reused on every run, **so that** repeated builds do not accumulate duplicates.
+
+**Type:** Story · **Size:** S · **Traces to:** §7.3 · **Depends on:** WRT-01 · **Q7 answered:** adopt the file-derived convention.
+
+**Spec**
+
+```python
+def ensure_data_file_object(sdk, name: str) -> Object
+```
+
+`sdk.get_object_by_name(...)` first; `sdk.add_object(...)` only if absent.
+
+**Naming must be deterministic** — the build has to find and update the same object next run rather than creating a duplicate. Proposed: the source file's basename without extension, so `hr_RenewableProfile.csv` → Data File object `hr_RenewableProfile`. Deterministic, unique per source file, and it matches how the file is already identified on the Data sheet.
+
+**Q7 is closed: adopt the file-derived convention.** Every Data File object the build creates is named after its source file's basename. APS's existing objects use human-phrased names — "APS hourly LMP", "APS Load 2025Q3" — and those stay exactly as they are: **objects already in the model are never renamed by a build**, because a rename appears in the diff as a removal plus an addition (DIFF-02) and would look like a structural change that did not happen.
+
+The two naming styles will therefore coexist in the model, and that is fine and worth saying out loud: file-derived names are the build's, human-phrased ones are APS's, and the difference is a useful signal of which is which.
+
+**Acceptance criteria**
+
+1. **Given** a source file with no matching Data File object, **then** one is created with the derived name.
+2. **Given** the same source file on a second build, **then** the existing object is reused and no second object is created.
+3. **Given** an existing object with a human-phrased name already linked to this property **by APS's own link**, **then** it is **not** reused and **not** renamed — the build creates its own Data File object for its own link (WRT-03), and a ledger entry names both. Reuse applies only to a Data File object a previous build created in the build's own scenario.
+4. **Given** two source files whose basenames collide, **then** the build fails naming both — silently sharing one Data File object between two sources would be wrong.
+
+---
+
+### WRT-03 — Decide where a Data sheet file lands in the tree
+
+**As** the build, **I want** each source file placed where its link expects it, **so that** refreshing a source shows as a data change rather than a rewiring.
+
+**Type:** Story · **Size:** M · **Traces to:** §7.2.1 · **Depends on:** BLD-03, WRT-02 · **Q6 answered:** a `target_folder` column on the Data sheet, defaulting to `APS_Inputs`.
+
+**Spec**
+
+**The build only ever writes files it owns.** This is the correction the second-link decision (WRT-07) forces on the original §7.2.1 rule, and it is the single most important line in this story: a CSV that APS's own link reads is **never** overwritten. Overwriting it would change what that link returns while leaving the link itself intact — which is worse than repointing it, because DIFF-03 would see nothing and only the data-level diff would catch it. It would also break the promise the example workbook makes to APS in writing: *"Existing scenarios and base data are left as they are."*
+
+So there are three cases, not two:
+
+| Case | Action |
+|---|---|
+| **Our Data File object from a previous build** (created by the build, tagged with the build's scenario) | Overwrite the CSV **at its existing stored path**, path unchanged. This is what makes "copy forward, change what differs" work: refreshing a source rewrites one file in place and changes nothing structural, so the run-to-run diff shows a data change rather than a spurious rewiring. |
+| **New source, no Data File object yet** | Create one and place the CSV at `<tree>\<target_folder>\<filename>` — `target_folder` defaults to **`APS_Inputs`** (naming below). |
+| **A Data File object exists but the build did not create it** — APS's own file, read by APS's own link | **Do not touch it.** Write our own file alongside, with our own Data File object, and link it in our scenario. Record a ledger entry naming the existing file and the one we wrote. |
+
+Ownership is determined by whether the Data File object is linked from a record carrying the build's scenario — not by filename, which can collide.
+
+**Filename.** The deliverable states the convention as `<tree>\<class>\<resolution>_<source stem>.csv`, where resolution is the smallest time column (`yr_`, `mn_`, `dy_`, `hr_`). Note APS's real tree uses `An_` for annual where the deliverable says `yr_`, and both appear in the example workbook — **WBK-04 settles which prefix vocabulary is canonical** before this story is started.
+
+**Placement.** `<tree>\<target_class>\` matches APS's observed convention: the tree is organised by category with `Generator\`, `Fuels\`, `Emission\`, `Lines\`, and files sit under the category of the class they feed.
+
+**Never move an existing Data File's path as a side effect of a build.** If a file genuinely needs relocating that is a deliberate act, and it will show in the structural diff as exactly what it is.
+
+**Placement — Q6 closed.** An optional `target_folder` column on the Data sheet, relative to the tree root, **defaulting to `APS_Inputs`**. Blank means `<tree>\APS_Inputs\`; filled in means exactly what it says.
+
+This replaced an earlier rule that placed each file under a folder named for its PLEXOS class. The default folder is better on three counts, and the reasoning is worth keeping close to the code:
+
+1. **Nothing is inferred.** The class-name rule had no answer for the tree's workflow folders — `Aurora\`, `LT Builds\`, `Load Following\`, `Load Forecasts\`, `Market\`, `Archive\` — which are groupings by purpose, not by class. There was no rule the build could apply to know when one of those was the right home, so it would have guessed wrong quietly.
+2. **It puts everything the build wrote in one place.** That makes WRT-03's central rule — *the build only ever writes files it owns* — visible in a folder listing rather than only in a diff. A file appearing under `APS_Inputs\` that nobody expected, or one of APS's own files changing outside it, are both immediately obvious.
+3. **It stays overridable per file**, in a cell, by the one person who knows where a file belongs (§2.2).
+
+Every placement still goes in the build report's assumptions section, defaulted or specified. A file in an unexpected folder still resolves and still produces a working model — exactly the class of thing §2.1 says must be stated in words rather than left to a diff.
+
+**Creating the folder.** `APS_Inputs\` will not exist in a model's tree the first time a build runs against it. The build creates it, and records that it did.
+
+**Acceptance criteria**
+
+1. **Given** a Data File this build's scenario created on a previous run, **then** its CSV is overwritten at its existing stored path and `t_text` is unchanged.
+2. **Given** APS's own `TimeSeries\Generator\hr_RenewableProfile.csv` and a Data sheet row targeting the same property, **then** that file's bytes are **unchanged**, a separate file is written for our link, and a ledger entry names both. Assert the original file's hash before and after.
+3. **Given** a new Data File and a blank `target_folder`, **then** it lands at `TimeSeries\APS_Inputs\<filename>` and the stored path matches — whatever its class.
+3b. **Given** a tree with no `APS_Inputs\` folder, **then** the build creates it and records that it did.
+3c. **Given** `target_folder = Load Forecasts`, **then** the file lands at `TimeSeries\Load Forecasts\<filename>` and the folder is created if absent.
+3d. **Given** a `target_folder` that escapes the tree — absolute, or containing `..` — **then** the build fails naming the cell.
+4. **Given** a property that already has a link when the build writes to it, **then** a **warning** is raised naming the existing file and the existing link — the deliverable promises this and under the second-link design it is the normal case, so it must be a report line rather than a silence.
+5. **Given** a placement, **then** a ledger entry names the file and the folder chosen.
+6. **Given** any existing Data File, **then** no build ever changes its stored path — assert it.
+
+---
+
+### WRT-04 — Write one Data sheet row
+
+**As** the build, **I want** one function that writes one row's worth of links, **so that** the remove-then-add sequence exists in exactly one place.
+
+**Type:** Story · **Size:** L · **Traces to:** §7.2, §2.3 · **Depends on:** WRT-01, WRT-02, WRT-03, FMT-02
+
+**Spec**
+
+```
+resolve target class / collection / property                      WRT-01
+determine object list:
+    wide          → non-time column headers                       FMT-02
+    single-object → [target_object]
+ensure Data File object exists                                    WRT-02
+place the CSV in the tree                                         WRT-03
+for each object:
+    membership = sdk.get_membership_by_names(
+        parent_class_lang_id, collection_lang_id, parent_name, object_name)
+
+    sdk.add_property(
+        membership     = membership,
+        property_obj   = property_obj,
+        value          = None,
+        data_file_text = <path relative to the model>,
+        data_file_tag  = data_file_obj,
+        band_id        = <row band, default 1>,
+        scenario_tag   = <the build's scenario>,                   WRT-05
+    )
+```
+
+**The constraint that shapes this whole story.** `add_property` is the *only* documented method that accepts `data_file_text` / `data_file_tag`. `update_property`'s documented signature is `update_property(membership, property_obj, value: float!, band_id=1, period_type_id?)` — `value` is required and there is no way to set or change a data file through it. There is no `create_if_missing`, and `bulk_update_property` requires a scenario tag. **A Datafile-backed property cannot be updated in place.** Where a record must be replaced, it is `remove_property` then `add_property`. This is exactly what EE's own `ReplaceModelInputFiles` does under `--replace-existing true`, which is good corroboration that it is the intended pattern rather than a workaround.
+
+`remove_property` returns a boolean rather than raising when nothing was there, so one code path handles both a first write and a re-write.
+
+**Note the interaction with WRT-07.** Under the second-link approach the build does **not** remove APS's existing link — it adds its own alongside, tagged with its own scenario. `remove_property` is used only to clear the build's *own* previous records from its *own* scenario (WRT-05), never to remove a link the build did not create.
+
+**Acceptance criteria**
+
+1. **Given** a wide file with three object columns, **then** three property records are created, one per membership.
+2. **Given** a single-object row, **then** exactly one record is created against the named object.
+3. **Given** an object named in a column that does not exist in the model, **then** the build fails before any write — this is VAL-02's job and WRT-04 must not paper over it.
+4. **Given** a completed row, **then** `v_property` shows each object's property with the right `data_file_path`, `data_file_object` and `scenario`.
+5. **Given** a failure part-way through a row's objects, **then** the transaction rolls back and no record from that row survives.
+6. **Given** APS's real model and the ten example rows, **then** all ten write and `sdk.validate()` passes.
+
+---
+
+### WRT-05 — Create and clear the build's scenario
+
+**As** the build, **I want** every value it writes to live in one scenario it owns, **so that** stale values are never reused and APS's own data is never touched. **[LATE]**
+
+**Type:** Story · **Size:** M · **Traces to:** deliverable §"Writing CSVs as datafiles" · **Depends on:** CDM-07, WRT-04 · **Q5 answered:** per-run; attach to whichever model the Run sheet names. **Q18 answered:** the scenario name is a Run sheet cell.
+
+**Spec**
+
+- All values written by a build go into a single scenario, named **`Automated Inputs`** by default, changeable in the workbook.
+- **Each build clears the scenario's contents and rewrites them**, so stale values from a previous build are never reused.
+- **The scenario object itself is kept, never deleted.** Deleting it would also remove its attachment to the model, and the attachment is what makes the data take effect. Consequence worth stating to APS: renaming the scenario in the workbook leaves a previous build's data in place under the old name — which is the mechanism for keeping a build's data if that is wanted, and a way to accumulate orphaned scenarios if it is not.
+- The scenario is attached to the model named in `target_model`. **A scenario only applies to models it is attached to**, so this step is what makes the data take effect at all.
+
+**Acceptance criteria**
+
+1. **Given** no existing `Automated Inputs` scenario, **then** one is created and attached to `target_model`.
+2. **Given** an existing one with records from a previous build, **then** its records are cleared and the new ones written — and the old records are gone, verified through `v_property`.
+3. **Given** an existing one, **then** the scenario **object** still has the same identity afterwards and its model attachment survives.
+4. **Given** a scenario name changed in the workbook, **then** the previous scenario and its data are left untouched and a ledger entry says so.
+5. **Given** a completed build, **then** every record the build wrote carries this scenario in `v_property.scenario`, and no record outside it was modified.
+
+---
+
+### WRT-06 — Read Order: one above the maximum on the target model
+
+**As** the build, **I want** its scenario to win against every other scenario on the model, **so that** the data it wrote is the data PLEXOS uses. **[LATE]**
+
+**Type:** Story · **Size:** M · **Traces to:** deliverable §"Writing CSVs as datafiles" · **Depends on:** CDM-07, WRT-05
+
+**Spec**
+
+Where two scenarios define the same data, PLEXOS reads them in `Read Order` and **the last read wins** — a higher Read Order is higher priority. Scenarios default to 0; the highest currently set in APS's model is **2000**.
+
+The build **reads the highest Read Order among the scenarios attached to `target_model` and sets its own to one above it.** No other scenario's Read Order is changed.
+
+**Why max+1 and not a fixed large number.** Two reasons, both learned the hard way:
+
+- A fixed value collides. `999` was proposed and is *below* three existing scenarios at 1000 and one at 2000 — it would have lost silently.
+- **Ties are not settled by Read Order.** Where two scenarios share a value at the same Read Order, PLEXOS falls back to the order they appear in the interface — by category, then alphabetically within category — so the winner would depend on the scenario's *name*. Taking one above the maximum avoids the tie entirely.
+
+The earlier idea of resetting other scenarios' Read Order down to make room is **rejected**: it edits APS's model to solve our problem, and it can create new ties among the scenarios it moves.
+
+Where the chosen value is not the expected one, the build records it and why (BLD-08).
+
+**One thing to fix in the deliverable, not in the code.** It says the build sets the value "one above it — normally 9999", and also that the highest Read Order currently in the model is 2000. Max+1 of 2000 is 2001; 9999 would only arise if a scenario at 9998 existed. The rule is right and the illustrative number is wrong — WBK-04 carries it.
+
+**Acceptance criteria**
+
+1. **Given** a target model whose highest attached Read Order is 2000, **then** the build's scenario is set to 2001.
+2. **Given** a target model with no scenarios attached, **then** the build's scenario is set to 1.
+3. **Given** any run, **then** no other scenario's Read Order is modified — assert by diffing scenario attributes before and after.
+4. **Given** a second build against the model the first produced, **then** the Read Order is recomputed and does not creep upward without cause (the build's own scenario is excluded from the maximum).
+5. **Given** the value chosen, **then** a ledger entry records it and the maximum it was derived from.
+
+---
+
+### WRT-07 — The second link: add ours, leave theirs
+
+**As** APS, **I want** existing links left exactly as they are, **so that** the build adds data without removing anything they rely on. **[LATE]**
+
+**Type:** Story · **Size:** L · **Traces to:** deliverable §"Writing CSVs as datafiles" · **Depends on:** WRT-04, WRT-05, WRT-06
+
+**Spec**
+
+The build adds its **own link** from the target attribute to the data file it writes, tagged with its scenario, and **leaves any existing link in place**. The new link **mirrors the existing one in every other respect** — bands, date ranges, time slices and any variables attached to it — so the two records differ only in the data file they read and the scenario that tags them.
+
+The two records coexist because the SDK's duplicate-detection rule treats records differing by scenario tag, Datafile tag or date range as **distinct**: two property records are the same only if membership, property, `band_id`, value, texts and tags all match. Different scenario tag → different record. That is what makes the second link possible at all.
+
+Read Order (WRT-06) is what decides which of the two PLEXOS actually uses.
+
+**What "mirrors" means concretely**, and each of these must be read off the existing record rather than defaulted:
+
+| Attribute of the existing link | Mirrored on the new link |
+|---|---|
+| `band_id` | Yes |
+| `date_from` / `date_to` | Yes |
+| Time slice tags | Yes |
+| Variable tags | Yes — WRT-08 |
+| Data file | **No** — ours |
+| Scenario tag | **No** — ours |
+
+**Acceptance criteria**
+
+1. **Given** a property with one existing link and no scenario, **then** after the build both records exist in `v_property`, distinguished by scenario and data file.
+2. **Given** an existing link with `date_from` set, **then** the new link carries the same `date_from`.
+3. **Given** an existing multi-band property, **then** a new link is created at the row's band (band 1 in v1, since the Data sheet carries no band column — §6.3) and mirrors the existing record at that band. Multi-band source files are out of scope until the sheet gains a band column; a property whose existing records span several bands raises a ledger entry naming the bands left untouched.
+4. **Given** a property with **no** existing link, **then** one new link is created with defaults and a ledger entry notes there was nothing to mirror.
+5. **Given** a built model opened in PLEXOS, **then** the value PLEXOS reports for that property is the one from our CSV. **This is the one stated exception to the Definition of Done's "covered by an automated test"** — nothing outside Desktop can prove what Desktop reads. Check it by hand, record the screenshot in the story, and treat the automated tests as necessary but not sufficient until it is done.
+
+---
+
+### WRT-08 — Carry conditional variables onto the new link
+
+**As** the build, **I want** any variable on the existing link copied to the new one, **so that** current behaviour is preserved rather than silently lost. **[LATE]**
+
+**Type:** Story · **Size:** M · **Traces to:** deliverable §"Writing CSVs as datafiles" · **Depends on:** WRT-07 · **Q10 answered:** the variables **should** apply to the new data — and must be called out explicitly in the build report. See §2.1.
+
+**Spec**
+
+Where an existing link carries a **conditional variable**, that variable is copied onto the new link.
+
+**Why this is not optional.** Data tagged with a conditional variable **overrides read ordering entirely**. A new link without the variable would lose to the old one regardless of Read Order — the build would complete, report success, and change nothing. This is the single most dangerous silent-failure mode in the write path.
+
+**Known real cases in the current model:**
+
+| Object / property | Variable |
+|---|---|
+| `Battery` → `Max Power` | `Battery Derate` |
+| One `Fuel` → `Price` (`MKTGas`) | `Fuel Adder for MKTGas` |
+
+Each is named individually in the build report.
+
+**Q10 is closed, and both halves of the answer matter.**
+
+*"It should apply to the new data files, but should be called out explicitly in the build report! It is critical that assumptions like this are called out explicitly. A diff report won't catch these."*
+
+So: **copy the variable** — this story stands as written, no per-row opt-out, no extra column. And the reporting half is not a nice-to-have attached to it; it is the reason the story is safe to implement at all. A carried variable changes what PLEXOS computes and leaves **no trace in any of the four diff levels**: structure unchanged, assignment records matching, CSV values identical. A modeller reading a clean diff would conclude nothing happened.
+
+That is why §2.1 exists, and this is its canonical case. The build report must name the object, the property and the variable, and say in words that the diff will not show it.
+
+**Acceptance criteria**
+
+1. **Given** an existing link carrying `Battery Derate`, **then** the new link carries it too, and a ledger entry names the object, the property and the variable.
+2. **Given** an existing link with no variable, **then** the new link has none and nothing is logged.
+3. **Given** a built model, **then** the number of links carrying each variable is unchanged plus exactly the number of new links the build created.
+4. **Given** any variable carried, **then** the build report lists it under exceptions and assumptions with Q10's open status stated — the modeller must be able to see that this was a decision, not a certainty.
+
+---
+
+### WRT-09 — Idempotency: build twice, get the same model
+
+**As** the build team, **I want** a repeated build against unchanged inputs to produce an identical model, **so that** "nothing changed" is provable.
+
+**Type:** Story · **Size:** M · **Traces to:** §7.4 · **Depends on:** WRT-04 … WRT-08, DIFF-03
+
+**Spec**
+
+Re-running a build against the same inputs must not duplicate records. Because a Datafile-backed property cannot be updated in place (§2.3), idempotency comes from the clear-and-rewrite of the build's own scenario (WRT-05) plus the remove-then-add sequence, not from an update call.
+
+What makes that safe is the SDK's own duplicate-detection rule: two property records are identical only if membership, property, `band_id`, value, texts and tags all match, with different scenario tags, Datafile tags or date ranges each counting as distinct.
+
+**The unresolved part, and it is not cosmetic.** `remove_property` targets membership + property + band and takes **no scenario argument**. Under the second link, APS's record and ours share membership, property and band and differ only by scenario — so a plain remove may take **both**. WRT-10 is the spike that answers this and it must land before this story is implemented. If removal is not scenario-scoped, the clear step in WRT-05 iterates the scenario's own records instead, and this story's mechanism changes accordingly. Do not write code against the assumption that it is scoped.
+
+The same identity rule drives the diff (DIFF-03) — one definition, used for writing and for diffing.
+
+**Acceptance criteria**
+
+1. **Given** two builds from the same workbook against the same source model, **then** `compare()` between the two run folders reports zero differences at every level.
+2. **Given** a second build, **then** the record count in `v_property` is unchanged — no accumulation.
+3. **Given** a second build, **then** no second Data File object is created for any source (WRT-02 case 2).
+4. **Given** a build, then a change to one CSV, then another build, **then** the diff reports exactly that one data change and no structural change.
+
+---
+
+### WRT-10 — [SPIKE] `remove_property` removal scope
+
+**As** the build team, **I want** to know exactly what `remove_property` removes, **so that** clearing our scenario cannot take out records we do not own.
+
+**Type:** Spike · **Size:** S · **Time-box:** 1 day · **Traces to:** §7.4, open item #2 · **Depends on:** WRT-04
+
+**The question.** `remove_property(membership, property_obj, band_id)` takes no scenario or date-range argument. If a property carries several records at the same band that differ only by scenario or date window, **a plain remove may take out more than intended** — including APS's existing link, which WRT-07 is specifically designed to leave alone.
+
+**What to test**, against a scratch copy of the populated model:
+
+1. A property with two records at band 1 differing only by scenario tag → what does `remove_property(membership, prop, band_id=1)` leave behind?
+2. A property with two records at band 1 differing only by date window → same question.
+3. Is there any scenario-scoped removal available — a parameter, a different method, or removal via the scenario object?
+
+**Acceptance criteria**
+
+1. Each case has an answer backed by a before/after `v_property` query recorded in the design doc.
+2. If removal is not scenario-scoped, WRT-05's clear step is rewritten to remove by iterating the scenario's own records, and WRT-07 gains an acceptance criterion asserting the existing link survives.
+3. §7.4's `[CONFIRM]` marker is closed.
+
+---
+
+### WRT-11 — [SPIKE] Batch write path and write performance
+
+**As** the build team, **I want** to know whether a batch write exists that accepts data-file parameters, **so that** wide files touching hundreds of objects do not make a build unusably slow.
+
+**Type:** Spike · **Size:** S · **Time-box:** 1 day · **Traces to:** §7.2, open item #3 · **Depends on:** WRT-04
+
+**The question.** `bulk_add_property` and `bulk_update_property` are documented, but **neither takes data-file parameters** and `bulk_update_property` requires a scenario tag. The per-object loop in WRT-04 may be the only correct option. Some APS sources touch hundreds of objects — 215 generators is a real number.
+
+**Measure before optimising.** Time a real wide file — `hr_RenewableProfile.csv` against its full object set — through the per-object loop. If the whole build is under a few minutes, this closes as "no action" and the loop stands.
+
+**Acceptance criteria**
+
+1. A measured wall-clock number for the largest real source, recorded in the design doc.
+2. A stated answer on whether any batch path accepts `data_file_text` / `data_file_tag`.
+3. If the loop is too slow **and** no batch path exists, a follow-up story is written — not an ad-hoc optimisation inside WRT-04.
+4. §7.2's `[CONFIRM]` marker is closed either way.
+
+---
+## EPIC G — Semantic validation (checkpoint 2)
+
+**Component C5.** Phase 6. Two checkpoints, deliberately separated by *what they can know*. Checkpoint 1 (FMT-03) runs against a file alone and needs no model. Checkpoint 2 needs the resolved `.db` and runs alongside the diff, because both answer the same question: **should I trust this build?**
+
+The rule set below was written for the first time in the technical design rather than carried from an agreed source, and the two-point placement was proposed rather than confirmed. **Q16 closed both: the rule set and the placement are accepted as specified.** One question remains inside the epic — Q9, whether incomplete coverage should warn or stop (VAL-04) — and a default is in place.
+
+Checkpoint 2 **fails the build** on any error (§7.1 step 10), with one boundary worth stating rather than leaving to an acceptance criterion: **findings that already existed in the source model are reported as pre-existing and do not stop the build.** They are a model condition the build met, not input the build was given — the standing rule's own distinction. Only findings this build introduced are errors. VAL-06 is where that line is drawn, and drawing it needs the before-and-after `sdk.validate()` results, which is why both are retained.
+
+---
+
+### VAL-01 — Targets resolve to exactly one match
+
+**As** the build, **I want** each row's class, collection and property to resolve unambiguously, **so that** an ambiguous name never silently picks one.
+
+**Type:** Story · **Size:** S · **Traces to:** §8.2 · **Depends on:** WRT-01 · **Q8 answered: yes** — exactly one match is always achievable from class + collection + property.
+
+**Spec**
+
+For every Data sheet row: `target_class`, `target_collection` and `target_property` each resolve to exactly one match against the live model. Zero matches and more than one match are both **errors**. More than one should now be unreachable — Q8 confirmed that class + collection always disambiguates — but the check stays, because picking the first would produce a model that is wrong in a way no diff would flag as suspicious, and an assumption worth relying on is worth asserting.
+
+All rows are checked and all failures reported together.
+
+**Acceptance criteria**
+
+1. **Given** a row with a class that does not exist, **then** an error naming the row, the value, and the closest real class names.
+2. **Given** a property name that resolves on two collections and a `target_collection` naming neither, **then** an error listing both candidates with their parent classes.
+3. **Given** five rows with resolution failures, **then** all five appear in one report.
+4. **Given** every row in the example workbook against APS's real model, **then** no findings.
+
+---
+
+### VAL-02 — Every named object exists in the model
+
+**As** the build, **I want** every object named — by a column header or by `target_object` — checked against the model, **so that** a typo in a header does not become a silently skipped generator.
+
+**Type:** Story · **Size:** S · **Traces to:** §8.2 · **Depends on:** VAL-01, FMT-02
+
+**Spec**
+
+Collect the object list per row (wide → non-time column headers; single-object → `target_object`), and check each against the model's objects **of that class**. An object that exists under a different class is a **different failure and gets a different message** — "`Metro to APS` exists as a `Line`, not a `Generator`" is immediately actionable; "not found" is not.
+
+Matching is exact in case and in interior spacing. No fuzzy matching and no normalisation **at this layer** — the reader has already stripped outer whitespace (FMT-01), and nothing further is trimmed, folded or guessed here. A build that guesses would write data to the wrong object.
+
+Missing objects are an **error**, and every one is listed.
+
+**Acceptance criteria**
+
+1. **Given** a wide file with one misspelled header, **then** an error naming the file, the header and the closest real object names of that class.
+2. **Given** a header naming a real object of the wrong class, **then** an error saying which class it actually is.
+3. **Given** a header differing only in trailing whitespace, **then** it matches — because FMT-01 stripped it. Assert here so the two stories cannot drift apart.
+4. **Given** a wide file with 40 headers of which 3 are wrong, **then** all 3 are named in one message.
+
+---
+
+### VAL-03 — Overlapping coverage across rows sharing a target
+
+**As** the build, **I want** two rows that target the same property and the same object to stop the build, **so that** nobody has to remember a precedence rule.
+
+**Type:** Story · **Size:** S · **Traces to:** §6.4, §8.2 · **Depends on:** VAL-02
+
+**Spec**
+
+Several rows may share the same `target_class` / `target_collection` / `target_property`, each covering a **different** set of objects. This needs no special mechanism — PLEXOS properties are written per object-membership, not atomically per class. APS already does this: `hr_RenewableProfile.csv` (existing renewables) and `hr_NewResRenProfile.csv` (planned resources) both feed hourly `Rating`.
+
+**But if two rows sharing a target cover any of the same objects, the build fails and names the overlapping objects.** No row-order winner, no "last one wins" — nothing anyone has to remember. This is a deliberate refusal to add a precedence rule.
+
+**Acceptance criteria**
+
+1. **Given** the two VER rows from the example workbook with disjoint object sets, **then** no finding.
+2. **Given** the same two rows with one generator appearing in both files, **then** an error naming that generator, both rows and both files.
+3. **Given** two rows sharing a target and overlapping on 12 objects, **then** all 12 are named, not just the first.
+4. **Given** the v1 interface, where every row is band 1 (§6.3), **then** overlap is evaluated on (target, object) alone. The overlap key is written as (target, object, band) from the start so that adding a band column later is a column change rather than a rule change — but there is no band escape hatch in v1 and the tests must not imply one.
+
+---
+
+### VAL-04 — Coverage completeness against the class's object count
+
+**As** a modeller, **I want** to know when objects of a targeted class are fed by no source at all, **so that** a generator missing from every file surfaces instead of silently defaulting.
+
+**Type:** Story · **Size:** S · **Traces to:** §8.2 · **Depends on:** VAL-02 · **Q9 answered:** carry on and warn, naming every uncovered object.
+
+**Spec**
+
+For each property targeted by any row, compare the union of objects covered across all rows against the model's full object count for that class. Report what is not covered.
+
+**Q9 is closed: carry on and warn.** Partial coverage is legitimate — a source that only feeds new resources covers a fraction of the class by design — so stopping every such build would be wrong.
+
+But an uncovered object keeps whatever value it had, which may be years stale, and nothing else in the pipeline would ever mention it. So the warning has to do real work: **every uncovered object is named in the build report's assumptions section, not merely counted.** A count tells a modeller something is missing without telling them what, which is the worst of both — it prompts a search instead of answering one.
+
+This is a §2.1 case. An object nobody fed is invisible to all four diff levels: its property record is unchanged, so there is nothing to report as changed. Only the build report can say it.
+
+Severity is a single configurable value in one place, so raising it to "error" later is a setting rather than a code change.
+
+Whatever the answer, the count and the list go in the build report either way.
+
+**Acceptance criteria**
+
+1. **Given** the model's full generator set and a source covering part of it, **then** the finding names every uncovered generator and the count. (The model held 215 generators when queried during design — confirm the current count rather than hard-coding it.)
+2. **Given** full coverage, **then** no finding.
+3. **Given** the severity set to "error", **then** the build stops — the switch lives in one place, not scattered through the checks.
+4. **Given** the finding, **then** the build report's assumptions section lists every uncovered object **by name**, not just the count — a count says something is missing without saying what.
+5. **Given** the severity later raised to "error", **then** it is a single configuration change with no edit to the check itself.
+
+---
+
+### VAL-05 — Horizon coverage
+
+**As** the build, **I want** a source file that does not span the model's horizon to stop the build, **so that** PLEXOS does not silently fill five years of flat values.
+
+**Type:** Story · **Size:** M · **Traces to:** §8.2; deliverable · **Depends on:** CDM-08, FMT-01 · **Q5 answered:** per-run; check against whichever model the Run sheet names.
+
+**Why this is an error and not a warning.** PLEXOS's `Missing Value Method` defaults to `0` = **Last Value**, which fills forward from the last value present to the end of the horizon, **silently**. (See CDM-08 on where that default comes from and what still needs confirming.) A file covering 2026–2040 against a 2026–2045 model produces a model that runs, reports nothing, and holds five years of flat-lined values that look like a modelling choice. Nothing downstream — not the diff, not `sdk.validate()`, not Desktop — flags it. This check is the only thing standing between that file and a plausible-looking wrong answer.
+
+This is squarely the "bad input data stops the build" half of the standing rule.
+
+**Spec**
+
+For each source file, compare its own time range against `model_horizon(db, target_model)` (CDM-08):
+
+| Case | Severity |
+|---|---|
+| File ends before the horizon ends | **Error** — the fill-forward case |
+| File starts after the horizon starts | **Error** — the leading-gap case |
+| File extends beyond the horizon | Note only — extra data is harmless and PLEXOS ignores it |
+| Gaps *within* the file's range | Already an error at checkpoint 1 (FMT-03 rule 5) |
+
+The error names the file, its actual range, the horizon, and the size of the shortfall in years.
+
+**Acceptance criteria**
+
+1. **Given** a model horizon of 2026–2045 and a file covering 2026–2040, **then** an error naming the five-year shortfall.
+2. **Given** a file covering 2026–2050 against the same horizon, **then** a note, and the build proceeds.
+3. **Given** a file covering exactly the horizon, **then** no finding.
+4. **Given** an hourly file, **then** coverage is evaluated at the file's own granularity, not coerced to years.
+5. **Given** several short files, **then** all are named in one message.
+
+---
+
+### VAL-06 — Fold in `sdk.validate()`
+
+**As** the build, **I want** the SDK's own integrity pass run as part of validation, **so that** a free check is not skipped.
+
+**Type:** Story · **Size:** S · **Traces to:** §2.3, §8.2, §7.1 step 13 · **Depends on:** WRT-04
+
+**Spec**
+
+Call `sdk.validate()` after the writes and before `db_to_xml`. Its findings are folded into the checkpoint-2 finding set with their own category, so a modeller can tell an SDK finding from one of ours.
+
+Run it **before** the writes too, against the freshly-copied model. If the source model is already failing the SDK's own checks, that needs to be visible as a pre-existing condition rather than appearing as something this build caused.
+
+**Acceptance criteria**
+
+1. **Given** a clean build, **then** `sdk.validate()` runs at both points and reports nothing.
+2. **Given** a source model with pre-existing findings, **then** they are reported as pre-existing, before the writes, and do not stop the build.
+3. **Given** a build that introduces a finding, **then** it is reported as new — the diff of the two validate results is what makes this distinction, so both results are retained.
+4. **Given** any SDK finding, **then** its text appears verbatim in the report rather than being reworded.
+
+---
+
+## EPIC H — Reporting: the build report and the diff report
+
+**Component C8.** Phase 7. **Q11 splits this into two artifacts, and the technical design's §11 ("one combined artifact") is now out of date.** APS's answer: *"the build report can be flat. The diff report should be a workbook. There should be a summary page, then detailed pages."*
+
+| Artifact | Answers | Form | Produced by |
+|---|---|---|---|
+| **Build report** | *What did the build decide, and what should I check?* | **Flat** — one plain-text `.txt` file | Every build, including a failed one |
+| **Diff report** | *What changed since last time?* | **Workbook** — a summary page then detail pages | Every build with a baseline, and every standalone comparison |
+
+The split is not just formatting. The build report is the home of §2.1's rule — **anything the diff cannot catch must be said in words** — and that content has no natural place in a diff workbook, because by definition it is what the diff does not show. Keeping them separate stops the one thing the comparison structurally cannot tell you from being filed behind five sheets of things it can.
+
+`APS_Build_Report_Example.xlsx` remains the shape reference for the **diff** report. The build report is new and has no mock-up yet.
+
+---
+
+### RPT-01 — Build report (flat)
+
+**As** an APS modeller, **I want** a short plain-text file saying what the build decided, **so that** the assumptions behind a clean run are in front of me — in a file my machine opens without being asked what to open it with.
+
+**Type:** Story · **Size:** M · **Traces to:** §11 (superseded by Q11); deliverable §"The build report" · **Depends on:** BLD-08, VAL-01 … VAL-06 · **Q11 answered:** flat.
+
+**Spec**
+
+One file, `Inputs\build_report.txt`, written on **every** build — successful, failed, or stopped at a checkpoint.
+
+**Plain text, not Markdown.** A `.md` file is something an APS modeller has no reason to recognise: it opens in the wrong application or in none, and its syntax gets in the way of the content rather than formatting it. A `.txt` opens in Notepad on every machine at APS, pastes into an email intact, and prints. That is the whole requirement.
+
+Formatting conventions, so it reads as a document rather than a log dump:
+
+- Section headings in `UPPER CASE` on their own line, with a rule of dashes beneath.
+- Wrap body text at 100 columns. Nothing relies on a window being wide.
+- Entries as indented `-` bullets, continuation lines aligned under the text.
+- Key/value pairs in the header aligned on a fixed column so they scan vertically.
+- No pipe tables, no backticks, no asterisks, no `#`. If something needs a table, it is a detail page in the diff workbook, not a paragraph in this file.
+
+Sections, in this order:
+
+1. **Run header.** Run name; source model path; `target_model`; scenario name and the Read Order it was given, with the maximum it was derived from; baseline run (or *"none — first run"*); start time and duration; every CLI override with the sheet value beside the value actually used (WBK-06).
+2. **Outcome.** One line: completed, or stopped at which step and why.
+3. **Exceptions and assumptions.** The ledger from BLD-08, one bullet each: what the build met, what it did, why, and where. **This is the point of the file.**
+4. **Validation findings.** Every checkpoint-1 and checkpoint-2 finding, errors first, each with its location.
+5. **Counts.** Rows written, objects touched, Data File objects created, orphan CSVs, files archived.
+6. **Standing notes.** Two, printed every time rather than left as tribal knowledge: renamed objects appear in the diff as one removal plus one addition, and the archived workbook's Compare sheet is scratch space that says nothing about this run (WBK-03).
+
+**The §2.1 test applies to every line of section 3:** *would the diff show this?* If no, it belongs here, spelled out in words, with the object and property named. Variables carried across (WRT-08) are the canonical case — they change what PLEXOS computes and leave no trace in any of the four diff levels.
+
+**Acceptance criteria**
+
+1. **Given** a completed build, **then** `build_report.txt` exists in the run folder with all six sections present.
+2. **Given** a build that stopped at checkpoint 1, **then** the file still exists, the outcome line names the step, and sections 3 and 4 hold everything gathered up to that point.
+3. **Given** a build that carried a conditional variable, **then** section 3 names the object, the property, the variable, and says in words that the diff will not show it.
+4. **Given** a build with an empty ledger, **then** section 3 reads *"No exceptions or assumptions recorded"* rather than being omitted. An absent section and an empty one must not look the same.
+5. **Given** a first run with no baseline, **then** the header says so, and no count reads `0` where the right answer is *"not measured"*.
+6. **Given** the file opened in Notepad at a default window size, **then** every line fits without horizontal scrolling and no formatting character appears that is not doing visible work.
+7. **Given** the file, **then** it contains no Markdown syntax at all — assert it, because the temptation to reach for a pipe table when a section gets long is exactly how this drifts back.
+
+---
+
+### RPT-02 — Diff report workbook: summary sheet
+
+**As** a modeller, **I want** the first page of the diff to tell me whether anything needs attention, **so that** I can stop there when nothing does.
+
+**Type:** Story · **Size:** M · **Traces to:** §11; Q11 · **Depends on:** DIFF-01 · **Q11 answered:** workbook, summary page then detail pages.
+
+**Spec**
+
+Excel workbook, written to `Inputs\diff_report.xlsx` for a build and to `<output_report_path>` for a standalone comparison (RPT-05).
+
+**Sheet 1 — Summary:**
+
+- **Header:** the two sides being compared, which is the baseline, and when the comparison ran. For a build, the run name and its baseline run; for a standalone comparison, the two folder paths.
+- **Headline counts**, one row per level: source files changed; objects added / removed; memberships added / removed; property records added / removed / changed; data files whose values changed.
+- **A pointer to the build report**, by filename, so a modeller who starts here finds the assumptions section rather than concluding from a clean diff that nothing happened. Under §2.1 this cross-reference is load-bearing, not a courtesy.
+
+**Sheets 2+ — the detail pages** (RPT-03).
+
+Formatting is deliberately plain: a standard spreadsheet output, not a designed document. Headers frozen, columns sized, landscape fit-to-width, no decorative colour.
+
+**Acceptance criteria**
+
+1. **Given** a completed comparison, **then** the workbook is written with a Summary sheet and one detail sheet per level, each present even when empty.
+2. **Given** an empty detail sheet, **then** it says why (*"No structural changes"*, *"Diff skipped — no baseline"*), never just blank.
+3. **Given** a first run with no baseline, **then** no diff workbook is produced and the build report's outcome line says so — an empty workbook would read as "nothing changed".
+4. **Given** the Summary sheet, **then** the build report is named on it.
+5. **Given** the workbook open in Excel, **then** every sheet prints to a readable width.
+
+---
+
+### RPT-03 — Diff report: detail pages, one per level
+
+**As** a modeller, **I want** each level's differences listed in full, **so that** a headline count can be opened up.
+
+**Type:** Story · **Size:** M · **Traces to:** §11, §10.4 · **Depends on:** RPT-02, DIFF-02 … DIFF-05
+
+**Spec**
+
+Each sheet is a flat table, one row per difference, with the natural key spelled out in columns so it can be filtered and pivoted.
+
+| Sheet | Key columns | Payload columns | Produced by |
+|---|---|---|---|
+| Source files | file path | status, old hash, new hash | Ours — no EE tooling exists |
+| Structure | parent class, parent object, collection, child class, child object | change type | Ours — `v_membership` + the object diff |
+| Assignments | + property, band, scenario, date from, date to | old value, new value, old data file, new data file, change type | Ours — `v_property` |
+| Data | property, object, time key | old value, new value, difference, % difference | EE `TimeSeriesComparison` |
+
+**The Assignments sheet carries the most weight and is the one a modeller should be pointed at first.** A Datafile pointer swapped to a different CSV — the most common change this pipeline produces — touches no `t_membership` row at all, so the Structure sheet reports nothing for it. Without this level the most routine kind of change in the whole process would be invisible.
+
+The Data sheet carries the per-property statistics from DIFF-05 (MAE, RMSE, correlation, max error, mean bias) in a small block above the detail rows — the example workbook shows the shape.
+
+**Acceptance criteria**
+
+1. **Given** a run that re-pointed one property, **then** the Assignments sheet has one row naming both CSVs and the Structure sheet is empty with its note.
+2. **Given** a level with more rows than Excel comfortably holds, **then** the sheet is truncated with an explicit count of what was omitted and a pointer to the full CSV written beside the workbook — never silently cut.
+3. **Given** every sheet, **then** the natural key columns are present and sortable.
+4. **Given** the Data sheet, **then** per-property statistics appear above the detail rows.
+
+---
+
+### RPT-04 — Significance threshold and the completeness rule
+
+**As** a modeller, **I want** small changes counted rather than listed, **so that** the diff report is readable without hiding anything.
+
+**Type:** Story · **Size:** S · **Traces to:** §11 · **Depends on:** RPT-03
+
+**Spec**
+
+**Every change is accounted for.** Below-threshold changes are **counted and summed** rather than dropped; only above-threshold changes are itemised in full.
+
+- The threshold is configurable per level and has a stated default (proposed: 0.5% relative change, or any absolute change on a property with no meaningful scale). Per §2.2 it gets a **Run sheet cell**, not only a CLI flag.
+- Every sheet that applies a threshold states the threshold **on the sheet**, and states the count and total magnitude of what fell below it.
+- A change that is below threshold but swaps a **data file pointer** is always itemised — a pointer swap has no magnitude and must never be summarised away.
+
+**Acceptance criteria**
+
+1. **Given** 400 changes of which 380 are below threshold, **then** 20 rows are itemised and a line states *"380 further changes below the 0.5% threshold, total magnitude X"*.
+2. **Given** a threshold of 0, **then** everything is itemised.
+3. **Given** a pointer swap of any magnitude, **then** it is itemised.
+4. **Given** any thresholded sheet, **then** the threshold value appears on it.
+5. **Given** the Run sheet's threshold cell, **then** changing it changes the report without a code change.
+
+---
+
+### RPT-05 — Diff report for a standalone comparison
+
+**As** a modeller comparing two arbitrary models, **I want** the same workbook shape, **so that** there is one thing to learn.
+
+**Type:** Story · **Size:** S · **Traces to:** §6.6, §10 · **Depends on:** RPT-02, DIFF-07
+
+**Spec**
+
+The same workbook as RPT-02 and RPT-03. There is **no build report** for a standalone comparison — nothing was built, so there are no decisions to record — and the workbook's header says so, rather than leaving a modeller looking for a file that does not exist.
+
+The header names both sides, states that **`model_1` is always the baseline**, and states that reversing the two reverses the report.
+
+Written to `output_report_path`, defaulting to `<output_root>\Comparisons\`, named for both sides and the date. **Never into either compared folder** — a standalone comparison owns neither side, and writing into one would be editing an archived record after the fact.
+
+**Acceptance criteria**
+
+1. **Given** a standalone comparison, **then** the workbook holds the four detail sheets and its header states that no build report accompanies it.
+2. **Given** the default output path, **then** the file lands in `Comparisons\` named for both sides and the date.
+3. **Given** a comparison run in both directions, **then** the two reports are mirror images.
+4. **Given** any standalone comparison, **then** nothing is written inside either compared folder — assert it.
+
+---
+
+## EPIC I — Preprocessors and legacy sources
+
+**Component C1.** Phase 8, and deliberately last: every one of these is small, they are independent of each other, and none of them can be written correctly until the Standard Format reader exists to check their output.
+
+**No shared framework, no plugin registry, no declarative mapping layer.** This matches how APS already works and was an explicit design decision — APS's own `Load_PLEXOS.py` and `Maintenance.py` are exactly this shape, and a framework would be a new thing to learn in exchange for nothing.
+
+---
+
+### PRE-01 — Preprocessor conventions and test harness
+
+**As** whoever writes the next preprocessor, **I want** the conventions written down and a harness that checks them, **so that** ten scripts stay consistent without a framework.
+
+**Type:** Chore · **Size:** M · **Traces to:** §4 · **Depends on:** FMT-03, FMT-04
+
+**Spec**
+
+Conventions, drawn from APS's own scripts:
+
+- Plain `pandas`, under ~100 lines, single purpose.
+- Config constants at the top of the file — paths, sheet names, horizon bounds. **No CLI argument parsing.**
+- Reads one source artifact, writes one or more Standard-Format CSVs through `write_standard_format` (FMT-04).
+- **Idempotent** — running twice on the same input produces byte-identical output. This is what makes DIFF-04 meaningful; a script that re-serialises differently each run would show as changed on every run and train everyone to ignore that level.
+
+Two established transformation patterns, both already in use:
+
+| Pattern | Source shape | Output | Real example |
+|---|---|---|---|
+| **Melt-on-columns** | Wide grid, one column per year/period | Long `Year, Month, Day, Period, value` rows | `Load_PLEXOS.py` (DSM, Embedded_DG, Incremental_DG, DistBATT) |
+| **Event expansion** | Event list with start/end dates | Dense daily mask, one 0/1 column per unit | `Maintenance.py` (outages → daily calendar 2026-01-01 to 2044-12-31) |
+
+**A convention worth stating because it is easy to get wrong:** `Maintenance.py` does **not** use `t_date_from` / `t_date_to` interval overrides. APS's actual convention is to pre-expand events into a dense timeseries. New outage-type preprocessors follow that pattern rather than emitting sparse intervals.
+
+The harness: given a preprocessor and its real source file, run it twice, assert byte-identical output, and run checkpoint 1 over every file it produced.
+
+**Acceptance criteria**
+
+1. **Given** any preprocessor, **when** run twice, **then** byte-identical output.
+2. **Given** any preprocessor's output, **then** checkpoint 1 passes it with no errors.
+3. **Given** a new preprocessor added to the repo, **then** it is picked up by the harness without registration.
+4. The conventions are a document in the repo, not only in this backlog.
+
+---
+
+### PRE-02 — Load forecast
+
+**As** the pipeline, **I want** `LOAD MultiYear_26LRF_Rev1.xlsx` converted to Standard Format, **so that** hourly regional load feeds `Region.Load`.
+
+**Type:** Story · **Size:** M · **Traces to:** §4 · **Depends on:** PRE-01
+
+**Spec**
+
+Melt-on-columns, following APS's existing `Load_PLEXOS.py`. Output: hourly, wide, one column per region. The model held eight `Region` objects when queried during design — `APS`, `Four Corners`, `Market`, `Metro`, `New Mexico`, `Northern`, `Palo Verde`, `Pinal` — but the script resolves the set from the model rather than hard-coding it. (Note `Market` is both a region name and a tree subfolder name; they are unrelated.) Handles the DSM / Embedded_DG / Incremental_DG / DistBATT components the existing script already handles.
+
+**Acceptance criteria**
+
+1. **Given** the real workbook, **then** an hourly Standard-Format CSV is produced with one column per region.
+2. **Given** the output, **then** every column header exactly matches a `Region` object name in the model (VAL-02 would otherwise fail the build).
+3. **Given** the output, **then** it spans the full model horizon — VAL-05 is the check that would otherwise stop the build, and the preprocessor is where the shortfall should be noticed first.
+4. **Given** the existing `Load_PLEXOS.py` output for the same input, **then** values match.
+
+---
+
+### PRE-03 — Gas price
+
+**As** the pipeline, **I want** `GasPrice 043026SJM.xls` converted, **so that** monthly gas price feeds `Fuel.Price`.
+
+**Type:** Story · **Size:** S · **Traces to:** §4 · **Depends on:** PRE-01
+
+**Spec**
+
+Monthly, wide, one column per gas fuel object. Note the hub-per-column case: the source carries one column per hub and each is a different PLEXOS `Fuel` object, so this is a wide file and `target_object` stays blank (FMT-02).
+
+**Acceptance criteria**
+
+1. **Given** the real workbook, **then** a monthly Standard-Format CSV with one column per fuel.
+2. **Given** the output, **then** every header matches a `Fuel` object name exactly, including `MKTGas` — which carries the `Fuel Adder for MKTGas` variable (WRT-08, Q10).
+3. **Given** the `.xls` (not `.xlsx`) format, **then** it is read without a manual conversion step.
+
+---
+
+### PRE-04 — Power price, with nodal aggregation
+
+**As** the pipeline, **I want** `PowerPrice 043026FCM.xls` aggregated from nodal to regional and converted, **so that** hourly price feeds `Region.Price`.
+
+**Type:** Story · **Size:** M · **Traces to:** §4 · **Depends on:** PRE-01
+
+**Spec**
+
+Two steps in one script: aggregate nodal prices to the regional level, then emit hourly wide Standard Format with one column per region.
+
+**The aggregation rule is a modelling decision, not a coding one** — simple mean, load-weighted mean, or something else. It must be stated at the top of the script as a named constant with a comment saying who decided it, and it belongs in the build report's provenance rather than buried in code. **Confirm with APS before writing it.**
+
+**Acceptance criteria**
+
+1. **Given** the real workbook, **then** an hourly Standard-Format CSV with one column per region.
+2. **Given** the aggregation, **then** the rule used is named in the script header and reproducible by hand on one sample hour.
+3. **Given** a node that maps to no region, **then** the script fails naming it rather than dropping it silently.
+
+---
+
+### PRE-05 — Coal price
+
+**As** the pipeline, **I want** `CoalDispFuelPricing_2026_Rev1_260817Calcs.csv` converted, **so that** annual coal price feeds `Fuel.Price`.
+
+**Type:** Story · **Size:** S · **Traces to:** §4 · **Depends on:** PRE-01
+
+**Spec**
+
+Annual. This is the single-object case from the example workbook — `target_object = CH13_Coal` — so the output has one data column and its header is ignored by the build. It will raise checkpoint 1's rule-6 warning by design if `target_object` is ever left blank, which is exactly the case that warning exists for.
+
+**Acceptance criteria**
+
+1. **Given** the real CSV, **then** an annual Standard-Format CSV with `Year` and one value column.
+2. **Given** the Data sheet row with `target_object = CH13_Coal`, **then** the pair validates cleanly through checkpoints 1 and 2.
+3. **Given** the same row with `target_object` blank, **then** the rule-6 warning fires and names both readings.
+
+---
+
+### PRE-06 — Outages to daily availability mask
+
+**As** the pipeline, **I want** `Outages Thursday May 21 2026 – Wednesday December 31 2031.xlsx` expanded to a daily mask, **so that** generator availability feeds `Generator.Units`.
+
+**Type:** Story · **Size:** M · **Traces to:** §4 · **Depends on:** PRE-01
+
+**Spec**
+
+Event expansion, following APS's existing `Maintenance.py`: an event list with start/end dates becomes a dense daily calendar, one 0/1 column per unit.
+
+**Pre-expand; do not emit sparse intervals.** APS's convention is the dense timeseries, and `t_date_from` / `t_date_to` interval overrides are deliberately not used.
+
+**The horizon trap is real here.** The source covers May 2026 – December 2031. The model horizon runs well past that. An outage file that stops in 2031 would, under `Missing Value Method = 0`, hold every unit at its 2031-12-31 availability for the rest of the horizon — a unit out on the last day would stay out for fourteen years. VAL-05 stops the build on this, and **the preprocessor must decide explicitly what happens past the source's end date** — pad with 1 (available), or stop and require a longer source. Confirm with APS; state the choice in the script header and in the build report.
+
+**Acceptance criteria**
+
+1. **Given** the real workbook, **then** a daily Standard-Format CSV with one 0/1 column per unit.
+2. **Given** an outage spanning a month boundary, **then** every day in it is 0 and the days either side are 1.
+3. **Given** the model horizon extending past the source, **then** the padding decision is applied explicitly and recorded, not left to PLEXOS's fill-forward.
+4. **Given** the existing `Maintenance.py` output for the same input, **then** values match over the overlapping range.
+
+---
+
+### PRE-07 — VER profiles
+
+**As** the pipeline, **I want** the renewable profile sources converted, **so that** hourly `Generator.Rating` is fed for both existing and planned resources.
+
+**Type:** Story · **Size:** M · **Traces to:** §4, §6.4 · **Depends on:** PRE-01
+
+**Spec**
+
+Two output files, matching the model's existing split: `hr_RenewableProfile.csv` (existing renewables) and `hr_NewResRenProfile.csv` (planned resources). Both feed hourly `Rating`, on **disjoint** generator sets.
+
+This is the reference case for VAL-03: two Data sheet rows, same target, different objects, no overlap — allowed and already how APS works. If the two files ever come to share a generator, VAL-03 stops the build and names it, which is the intended behaviour.
+
+**Acceptance criteria**
+
+1. **Given** the real sources, **then** two hourly Standard-Format CSVs are produced.
+2. **Given** both outputs, **then** their column sets are disjoint and VAL-03 reports nothing.
+3. **Given** a generator deliberately added to both, **then** VAL-03 names it and the build stops.
+4. **Given** the outputs, **then** every header matches a `Generator` object name exactly.
+
+---
+
+## EPIC J — Packaging, operations and handover
+
+Runs throughout, not at the end. OPS-01 is sprint 1 — the environment check in particular, because **Q1 (is the Cloud CLI installed and licensed?) blocks everything** and is cheapest to discover on day one.
+
+---
+
+### OPS-01 — Repo, dependencies and environment check
+
+**As** the build team and later APS, **I want** a repo that says what it needs and checks it, **so that** "it doesn't work on my machine" has an answer.
+
+**Type:** Chore · **Size:** M · **Traces to:** §13 · **Depends on:** — · **Q1 answered:** the Cloud CLI is installed on every machine that will run this, and every user is licensed. The dependency is secured; the check below stays as a guard, not as an open risk.
+
+**Spec**
+
+| Dependency | Purpose | Note |
+|---|---|---|
+| `plexos_sdk` | All model reads/writes, XML↔DB conversion | `pip install plexos_sdk-*.whl` — plain local package, no cloud container |
+| **PLEXOS Cloud CLI** | DB↔XML conversion backend; required by EE scripts | A **local executable**, not a cloud service call. **The one hard external dependency.** |
+| `duckdb` | CDM views, diff engine | Same pattern EE's own scripts use |
+| `pandas` | Preprocessors, report assembly | |
+| `openpyxl` | Sources workbook, Excel report | |
+| `eecloud` | Required by EE automation scripts | |
+
+Target platform: **PLEXOS Desktop, running locally against archived `.xml` / `.db` files.** The Cloud-only pieces — DataHub, Cloud Studies and changesets, Pre/Post task-definition chains — do not apply, and `CreateChangeSet` is not part of this design.
+
+Deliver a `check_environment` command that verifies each dependency, prints the Cloud CLI's version, and exits non-zero with a specific message on any failure. Run it as the first thing in CI and name it in the runbook as the first thing to run on a new machine.
+
+**Acceptance criteria**
+
+1. **Given** a machine with everything installed, **then** `check_environment` exits 0 and prints each version.
+2. **Given** a machine without the Cloud CLI, **then** it exits non-zero naming the CLI and where it is expected.
+3. **Given** a pinned dependency set, **then** a fresh install reproduces it exactly — versions pinned, not ranged.
+4. **Given** CI, **then** the check runs before any test.
+
+---
+
+### OPS-02 — CLI entry points
+
+**As** anyone running this, **I want** two commands with obvious names, **so that** the pipeline is reachable without reading code.
+
+**Type:** Chore · **Size:** S · **Traces to:** §10, §6.1.1 · **Depends on:** BLD-04, DIFF-07
+
+**Spec**
+
+```
+plexos-build   <workbook.xlsx> [--run-name …] [--output-root …] [--force] [--dry-run]
+plexos-compare [<old> <new>] [--workbook …] [--report …]
+check-environment
+```
+
+`plexos-compare` with no arguments and no filled-in Compare sheet lists the run folders it can find and asks which two. The listing already exists for the build's pre-flight, so this is nearly free.
+
+**Acceptance criteria**
+
+1. **Given** each command with `--help`, **then** every option is documented with its default.
+2. **Given** a failed build, **then** the exit code is non-zero and distinguishes validation failure from an internal error.
+3. **Given** `plexos-compare` with no arguments, **then** the run folders are listed and two can be picked.
+
+---
+
+### OPS-03 — Logging
+
+**As** whoever is debugging a build a month later, **I want** a log in the run folder, **so that** the build report's summary can be opened up.
+
+**Type:** Chore · **Size:** S · **Traces to:** §7.1 · **Depends on:** BLD-04
+
+**Spec**
+
+A plain text log written into the run folder alongside the report. One line per build step with start, end and duration; every SDK call that writes, with its arguments; every finding, at the point it was raised. Console output stays short — progress and findings only; the detail lives in the file.
+
+The log is **not** a substitute for the exception ledger (BLD-08). The ledger is curated and goes in the report for a modeller; the log is exhaustive and goes in the folder for whoever is debugging.
+
+**Acceptance criteria**
+
+1. **Given** any build, **then** a log is written into the run folder, including for a failed build.
+2. **Given** a failed build, **then** the last log line identifies the step that failed.
+3. **Given** the log, **then** no absolute path outside the run folder is written that would leak a user's home directory into an archived artifact.
+
+---
+
+### OPS-04 — Handover runbook
+
+**As** APS after handover, **I want** a runbook, **so that** the pipeline outlives the engagement.
+
+**Type:** Chore · **Size:** M · **Traces to:** §1.1 (ownership column) · **Depends on:** everything
+
+**Spec**
+
+Written for the APS modeller who will own this, not for the build team. Covers: installing and checking the environment; filling in the workbook; running a build; reading the build report; running a standalone comparison; adding a new source (which is a new row, and sometimes a new preprocessor); what each failure message means and what to do about it; and what the build will *not* do.
+
+Per §1.1, ownership after handover splits: APS owns the preprocessors, the templates and the workbook; everything else transfers from Utilicast to APS. The runbook is what makes the transfer real.
+
+**Acceptance criteria**
+
+1. **Given** the runbook, **then** someone who has not seen the code can run a build end to end on a test model.
+2. **Given** each failure message the build can emit, **then** the runbook names it and says what to do.
+3. **Given** the runbook, **then** adding a new source is documented as a worked example from real APS data, not in the abstract.
+
+---
+
+## Appendix A — Design coverage check
+
+Every section of the technical design, and where it is built. The `[LATE]` rows at the bottom are decisions that live only in the APS-facing deliverable — the technical design has not caught up with them yet, and **updating it is itself a piece of work someone should own.**
+
+| § | Subject | Stories |
+|---|---|---|
+| 1.1 | Components C1–C8 | Epic map; OPS-04 (ownership) |
+| 2.1–2.2 | Data File linkage chain | CDM-05, WRT-04 |
+| 2.3 | SDK `add_property`; `update_property` constraint | WRT-04, WRT-09 |
+| 2.4 | Name-based resolution | WRT-01 |
+| 2.5 | The `.db` is not a given | CDM-01 |
+| 3.1 | Standard Format shape and granularity | FMT-01 |
+| 3.2 | Two file shapes | FMT-02 |
+| 3.3 | Why everything goes through a Datafile | WRT-04. **Q15 answered: no** — modelers do not read values inline in Desktop's property grid, so §3.3's stated cost is not a cost. |
+| 4 | Preprocessor conventions and patterns | PRE-01 … PRE-07 |
+| 5 | Standard templates | FMT-05 |
+| 6.1 | Run sheet | WBK-01, BLD-01 |
+| 6.1.1 | Model and tree travel together | BLD-03, CDM-06, BLD-07 |
+| 6.2 | Sources / Data sheet columns | WBK-02 |
+| 6.3 | Bands and scenarios deferred | WBK-02 (internal signature) |
+| 6.4 | Multiple rows per target; overlap is an error | VAL-03, PRE-07 |
+| 6.5 | Property disambiguation | WRT-01, VAL-01. **Q8 answered: yes** — four name columns are a complete key. |
+| 6.6 | Compare sheet | WBK-03, DIFF-07, RPT-05 |
+| 7.1 | Build flow | BLD-04 |
+| 7.1.1 | Pre-flight checks | BLD-01 |
+| 7.2 | Writing one row | WRT-04; WRT-11 |
+| 7.2.1 | Where a file lands in the tree | WRT-03; Q6 |
+| 7.3 | Data File object naming | WRT-02; Q7 |
+| 7.4 | Idempotency | WRT-09, WRT-10 |
+| 8.1 | Checkpoint 1 | FMT-03 |
+| 8.2 | Checkpoint 2 | VAL-01 … VAL-06 |
+| 9.1 | `v_membership` | CDM-04 |
+| 9.2 | `v_property` | CDM-03, CDM-05 |
+| 9.3 | DuckDB access | CDM-02 |
+| 10, 10.1 | Diff engine and input contract | DIFF-01 |
+| 10.2, 10.3 | Matching and implementation | DIFF-02, DIFF-03 |
+| 10.4 | The three pieces plus source files | DIFF-04, DIFF-05 |
+| 11 | Report | RPT-01 … RPT-05 — **superseded by Q11**: §11's "one combined artifact" is now two, a flat build report and a diff workbook. §11 needs rewriting. |
+| 12 | Run archive layout | BLD-02, BLD-06. **Q14 answered: yes to both.** §12 also names `Input Creation Driver.xlsx`, which Q13 confirms does not exist — remove it. |
+| 13 | Environment and dependencies | OPS-01. **Q1 answered: installed and licensed everywhere.** §13's Change Database `[CONFIRM]` is closed by Q17 — remove the marker. |
+| 14 | Build sequence | Sprint plan |
+| 15 #1, #1b, #2, #3, #5 | Open items we close ourselves | CDM-03, CDM-04, CDM-06, WRT-10, WRT-11 |
+| 15 #4 | Cloud CLI change-database subcommand | **Q17 closed by decision** — not in the SDK, so treated as not existing. No story. |
+| 15 #6–#10, #12–#16 | Open items needing APS | Q1 … Q15 — **thirteen of fifteen answered 2026-09-20**; Q6 and Q9 restated in §5.2 |
+| 15 #11 | Validation rule set never agreed with APS | **Q16 answered: yes**, the rule set and its placement are accepted |
+| **[LATE]** | Scenario, Read Order, second link, variables | WRT-05 … WRT-08, CDM-07, WBK-04 |
+| **[LATE]** | Build report exception ledger | BLD-08, RPT-02 |
+| **[LATE]** | Horizon / Missing Value Method | CDM-08, VAL-05 |
+| **[LATE]** | Data file naming (`<resolution>_<stem>.csv`) | WRT-03; WBK-04 (the `An_` vs `yr_` conflict) |
+| **[LATE]** | Archived source folder name (`Copy of Source Data`) | WBK-04, BLD-06, DIFF-04 |
+| **[LATE]** | Scenario name is changeable | WBK-01, WBK-04, WRT-05; **Q18** |
+| **[LATE]** | Warning when a property already has a link | WRT-03 AC4 |
+
+---
+
+## Appendix B — Story index
+
+| ID | Title | Type | Size | Sprint |
+|---|---|---|---|---|
+| OPS-01 | Repo, dependencies and environment check | Chore | M | 1 |
+| CDM-01 | Generate a queryable `.db` from a model `.xml` | Story | S | 1 |
+| CDM-02 | Read a `.db` through DuckDB, read-only | Chore | S | 1 |
+| CDM-03 | Verify the `t_tag` / `t_text` / `t_membership` joins | Spike | M | 1 |
+| CDM-04 | `v_membership` view | Story | S | 1 |
+| CDM-05 | `v_property` view | Story | M | 1 |
+| CDM-06 | Stored data-file paths | Story | S | 2 |
+| CDM-07 | Scenarios, Read Order, model attachment | Story | M | 2 |
+| CDM-08 | Run horizon | Story | S | 2 |
+| DIFF-01 | `compare()` engine and folder→model resolution | Story | M | 2 |
+| DIFF-02 | Structural diff | Story | S | 2 |
+| DIFF-03 | Assignment diff | Story | M | 2 |
+| DIFF-04 | Source-file diff | Story | S | 8 |
+| DIFF-05 | Data diff via `TimeSeriesComparison` | Story | M | 8 |
+| DIFF-06 | Diff regression harness | Chore | M | 2 |
+| DIFF-07 | Standalone entry point | Story | S | 8 |
+| FMT-01 | Standard Format reader | Story | M | 3 |
+| FMT-02 | Shape from `target_object` | Story | S | 3 |
+| FMT-03 | Checkpoint 1 | Story | M | 3 |
+| FMT-04 | Standard-Format writer | Story | S | 3 |
+| FMT-05 | Blank templates | Story | S | 3 |
+| WBK-01 | Run sheet reader | Story | S | 3 |
+| WBK-02 | Data sheet reader | Story | S | 3 |
+| WBK-03 | Compare sheet reader | Story | S | 3 |
+| WBK-04 | Reconcile the workbook schema | Chore | S | **3, first** |
+| WBK-05 | Workbook validation and error reporting | Story | M | 4 |
+| WBK-06 | CLI overrides | Story | S | 4 |
+| BLD-01 | Pre-flight checks | Story | M | 4 |
+| BLD-02 | Create the run folder | Story | S | 4 |
+| BLD-03 | Copy model and tree forward | Story | M | 4 |
+| BLD-04 | Build driver | Story | L | 7 |
+| BLD-05 | Post-build path re-check | Story | S | 4 |
+| BLD-06 | Archive workbook and source files | Story | S | 8 |
+| BLD-07 | Orphan data-file count | Story | S | 4 |
+| BLD-08 | Exception and assumption ledger | Story | M | 7 |
+| WRT-01 | Resolve class / collection / property / object | Story | M | 5 |
+| WRT-02 | Ensure the Data File object exists | Story | S | 5 |
+| WRT-03 | Where a file lands in the tree | Story | M | 5 |
+| WRT-04 | Write one Data sheet row | Story | L | 5 |
+| WRT-05 | Create and clear the build's scenario | Story | M | 6 |
+| WRT-06 | Read Order: max + 1 | Story | M | 6 |
+| WRT-07 | The second link | Story | L | 6 |
+| WRT-08 | Carry conditional variables across | Story | M | 6 |
+| WRT-09 | Idempotency | Story | M | 6 |
+| WRT-10 | `remove_property` removal scope | Spike | S | 5 |
+| WRT-11 | Batch write path and performance | Spike | S | 6 |
+| VAL-01 | Targets resolve to one match | Story | S | 7 |
+| VAL-02 | Named objects exist | Story | S | 7 |
+| VAL-03 | Overlapping coverage | Story | S | 7 |
+| VAL-04 | Coverage completeness | Story | S | 7 |
+| VAL-05 | Horizon coverage | Story | M | 7 |
+| VAL-06 | `sdk.validate()` | Story | S | 7 |
+| RPT-01 | Build report (flat) | Story | M | 8 |
+| RPT-02 | Diff report workbook: summary sheet | Story | M | 8 |
+| RPT-03 | Diff report: detail pages per level | Story | M | 8 |
+| RPT-04 | Threshold and completeness rule | Story | S | 8 |
+| RPT-05 | Diff report for a standalone comparison | Story | S | 8 |
+| PRE-01 | Preprocessor conventions and harness | Chore | M | 9 |
+| PRE-02 | Load forecast | Story | M | 9 |
+| PRE-03 | Gas price | Story | S | 9 |
+| PRE-04 | Power price with nodal aggregation | Story | M | 9 |
+| PRE-05 | Coal price | Story | S | 9 |
+| PRE-06 | Outages to daily mask | Story | M | 9 |
+| PRE-07 | VER profiles | Story | M | 9 |
+| OPS-02 | CLI entry points | Chore | S | 9 |
+| OPS-03 | Logging | Chore | S | 9 |
+| OPS-04 | Handover runbook | Chore | M | 9 |
+
+**67 items: 56 stories, 8 chores, 3 spikes.**
+
+Rough order-of-magnitude, at the sizes above (S = 1 day, M = 2.5, L = 6): **≈ 127 developer-days of build work**, before review, APS meetings, or anything the remaining open questions change. That is a planning number, not a commitment.
+
+With APS's answers in, the three items most likely to move it are now **CDM-03** (if the `v_property` joins are not what we think, everything downstream shifts), **CDM-07** (the Read Order schema path is asserted, not traced — and WRT-05 and WRT-06 both stand on it), and **WRT-07** (the second link is the least-proven mechanism in the whole design, and only PLEXOS Desktop can prove it works). Q10's answer removed the fourth: the variables apply, no opt-out column needed.
