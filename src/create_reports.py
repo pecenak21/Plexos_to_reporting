@@ -4,9 +4,10 @@ import pandas as pd
 import duckdb
 from collections import defaultdict
 from convert_zip_to_parquet import convert_zip_to_parquet
-from transformers import (export_block_to_csv, process_flat_block, process_daily_block, process_nested_block, process_ratings_block, process_3_block, process_23_block, process_32_block)
+from transformers import (export_block_to_csv, process_flat_block, process_daily_block, process_nested_block, process_ratings_block, process_3_block, process_23_block, process_32_block, arrange_section)
 from standard_integration_testing import run_sit_validation, tee_output
 from database import initialize_database_structures
+from name_mapping import load_maptables
 import exceptions_report
 
 def load_excel_config(config_path):
@@ -59,25 +60,23 @@ def load_excel_config(config_path):
     df_units['UnitTo'] = df_units['UnitTo'].astype(str).str.strip()
     df_units['ConversionRate'] = pd.to_numeric(df_units['ConversionRate'])
 
-    df_map = pd.read_excel(xl, 'Generator_name_map')
-    asset_mapping = dict(zip(df_map['Resources_Plexos'], df_map['Resources_RTSim']))
-    
-    # Section 23 contract table: (Plexos fuel, RTSim report label, MMBtu -> contract unit factor).
-    # Labels are kept unstripped -- RTSim's row labels are fixed-width and the padding is significant.
-    contract_rows = []
-    if 'Contract_name_map' in xl.sheet_names:
-        df_contracts = pd.read_excel(xl, 'Contract_name_map')
-        for plexos, label, factor in zip(df_contracts['Resources_Plexos'], df_contracts['Report_Label'],
-                                         df_contracts['ConversionFactor']):
+    # Every "maptable..." sheet: report name in column 1, the name it replaces in column 2
+    name_map = load_maptables(xl)
+
+    # Section 23 factors: (Plexos fuel, MMBtu -> contract unit factor). The fuel's report
+    # label comes from the maptables (maptable_Contracts).
+    contract_factors = []
+    if 'Contract_factors' in xl.sheet_names:
+        df_factors = pd.read_excel(xl, 'Contract_factors')
+        for plexos, factor in zip(df_factors['Resources_Plexos'], df_factors['ConversionFactor']):
             if pd.isna(plexos) or not str(plexos).strip():
                 continue
-            label = '' if pd.isna(label) else str(label)
-            contract_rows.append((str(plexos).strip(), label, pd.to_numeric(factor, errors='coerce')))
+            contract_factors.append((str(plexos).strip(), pd.to_numeric(factor, errors='coerce')))
 
-    return blueprint, blueprint_rat, asset_groups, input_path, cli_path, base_output_path, df_units, script_path, asset_mapping, contract_rows
+    return blueprint, blueprint_rat, asset_groups, input_path, cli_path, base_output_path, df_units, script_path, name_map, contract_factors
 
 
-def execute_standard_report(parquet_base_dir, blueprint, asset_groups, output_path, years, unique_months, df_units, asset_mapping, contract_map=()):
+def execute_standard_report(parquet_base_dir, blueprint, asset_groups, output_path, years, unique_months, df_units, name_map, contract_factors=()):
     print("[+] Building Standard Report...")
     grouped_blueprint = defaultdict(list)
     for entry in blueprint:
@@ -88,6 +87,8 @@ def execute_standard_report(parquet_base_dir, blueprint, asset_groups, output_pa
     for header, row_entries in grouped_blueprint.items():
         blocks_for_header = []
         idx_flag = True
+        # Stays True while every block in the section is a plain name-per-row grid (flat, section 23)
+        name_indexed = True
         
         print(f"[+] Processing section: {header}")
         for row in row_entries:
@@ -113,13 +114,13 @@ def execute_standard_report(parquet_base_dir, blueprint, asset_groups, output_pa
                     parquet_base_dir, parent_in, child_in, header, years, unique_months, 
                     df_units=df_units, category_list=target_categories, 
                     class_name=c_in, is_rate=is_rate, temporal_pattern=temp_pattern,
-                    explicit_unit=unit_val, asset_mapping=asset_mapping
+                    explicit_unit=unit_val, name_map=name_map
                 )
                 idx_flag, header_flag = False, False
 
             elif header.startswith("( 23 )"):
                 print(f"Note: Custom Code to match RTSim output")
-                df_block = process_23_block(parquet_base_dir, years, unique_months, contract_map)
+                df_block = process_23_block(parquet_base_dir, years, unique_months, contract_factors, name_map=name_map)
                 idx_flag, header_flag = True, True
 
             elif header == "( 32 ) Total Effluents by Type lbs":
@@ -128,12 +129,12 @@ def execute_standard_report(parquet_base_dir, blueprint, asset_groups, output_pa
                     parquet_base_dir, prop_input, parent_in, child_in, header, years, unique_months,
                     df_units=df_units, category_list=target_categories,
                     class_name=c_in, is_rate=is_rate, temporal_pattern=temp_pattern,
-                    explicit_unit=unit_val, asset_mapping=asset_mapping
+                    explicit_unit=unit_val, name_map=name_map
                 )
                 idx_flag, header_flag = False, False
 
             elif temp_pattern in ("daily", "daily-summary"):
-                df_block = process_daily_block(parquet_base_dir, prop_input, years, unique_months, class_name=c_in, is_rate=is_rate, temporal_pattern=temp_pattern, asset_mapping=asset_mapping, df_units=df_units, explicit_unit=unit_val)
+                df_block = process_daily_block(parquet_base_dir, prop_input, years, unique_months, class_name=c_in, is_rate=is_rate, temporal_pattern=temp_pattern, name_map=name_map, df_units=df_units, explicit_unit=unit_val)
                 idx_flag, header_flag = True, False
             else:
                 if nested:
@@ -141,7 +142,7 @@ def execute_standard_report(parquet_base_dir, blueprint, asset_groups, output_pa
                         parquet_base_dir, prop_input, parent_in, child_in, header, years, unique_months, 
                         df_units=df_units, category_list=target_categories, 
                         class_name=c_in, is_rate=is_rate, temporal_pattern=temp_pattern,
-                        explicit_unit=unit_val, asset_mapping=asset_mapping
+                        explicit_unit=unit_val, name_map=name_map
                     )
                     idx_flag, header_flag = False, False
 
@@ -150,10 +151,13 @@ def execute_standard_report(parquet_base_dir, blueprint, asset_groups, output_pa
                         parquet_base_dir, prop_input, header, years, unique_months, 
                         df_units=df_units, category_list=target_categories, 
                         class_name=c_in, is_rate=is_rate, temporal_pattern=temp_pattern,
-                        explicit_unit=unit_val, asset_mapping=asset_mapping
+                        explicit_unit=unit_val, name_map=name_map
                     )
                     idx_flag, header_flag = True, True
                 
+            # Flat and section 23 blocks are the only ones with both an index and a header row
+            name_indexed = name_indexed and idx_flag and header_flag
+
             if df_block is not None and not df_block.empty:
                 print(f"    - Data retrieved for: {prop_input}")
                 if sign != 1:
@@ -169,13 +173,12 @@ def execute_standard_report(parquet_base_dir, blueprint, asset_groups, output_pa
                 print(f"    - [!] No data returned for: {prop_input}")
                 exceptions_report.record_no_data(header, prop_input, c_in)
 
-        # Several flat blocks under one header each bring their own Total row; RTSim shows
-        # a single Total for the whole section, so replace them with one recomputed at the end.
-        if len(blocks_for_header) > 1 and all('Total' in b.index for b in blocks_for_header):
-            body = pd.concat([b.drop(index='Total') for b in blocks_for_header], axis=0)
+        # Name-per-row sections are combined and mapped as a whole: that is where rows from
+        # different blueprint rows meet (System Summary), and where one Total row replaces
+        # the Total each flat block brings.
+        if blocks_for_header and name_indexed:
             header_is_rate = all(str(r[5]).strip().lower() == 'true' for r in row_entries)
-            total = body.where(body != 0).mean(axis=0).fillna(0) if header_is_rate else body.sum(axis=0)
-            blocks_for_header = [body, total.to_frame('Total').T]
+            blocks_for_header = [arrange_section(blocks_for_header, name_map, years, unique_months, header_is_rate)]
 
         if blocks_for_header:
             compiled_sections.append((header, pd.concat(blocks_for_header, axis=0), idx_flag, header_flag))
@@ -188,10 +191,11 @@ def execute_standard_report(parquet_base_dir, blueprint, asset_groups, output_pa
                 header_title=header, 
                 df_block=df_block, 
                 include_index=idx_flag, 
-                include_header=header_flag
+                include_header=header_flag,
+                name_map=name_map
             )
 
-def execute_timeslice_report(parquet_base_dir, blueprint_rat, asset_groups, output_path, years, unique_months, df_units, asset_mapping=None):
+def execute_timeslice_report(parquet_base_dir, blueprint_rat, asset_groups, output_path, years, unique_months, df_units, name_map=None):
     print("[+] Building Timeslice Report...")
     timeslice_query = "SELECT DISTINCT TimesliceName FROM mem_fki ORDER BY TimesliceId"
     timeslices = duckdb.query(timeslice_query).df()['TimesliceName'].tolist()
@@ -215,7 +219,7 @@ def execute_timeslice_report(parquet_base_dir, blueprint_rat, asset_groups, outp
                 category_list=target_categories,
                 class_name=c_in,
                 timeslice_name=ts_name,
-                explicit_unit=unit_val, asset_mapping=asset_mapping
+                explicit_unit=unit_val, name_map=name_map
             )
             
             if df_block is not None and not df_block.empty:
@@ -232,7 +236,7 @@ def execute_timeslice_report(parquet_base_dir, blueprint_rat, asset_groups, outp
     print(f"[+] Writing Timeslice report to: {output_path}")
     with open(output_path, 'w', newline='', encoding='utf-8') as f:
         for title, df_block, _, _ in compiled_sections:
-            export_block_to_csv(f, header_title=title, df_block=df_block)
+            export_block_to_csv(f, header_title=title, df_block=df_block, name_map=name_map)
 
 def execute_pipeline(config_path):
     exceptions_report.reset()
@@ -248,7 +252,7 @@ def execute_pipeline(config_path):
         print(f"[+] Run log written to: {run_log_path}")
 
 
-def _generate_reports(blueprint, blueprint_rat, asset_groups, input_path, cli_path, dir_name, df_units, script_path, asset_mapping, contract_rows):
+def _generate_reports(blueprint, blueprint_rat, asset_groups, input_path, cli_path, dir_name, df_units, script_path, name_map, contract_factors):
     parquet_path_out=os.path.join(dir_name, "Parquet Files")
 
     parquet_base_dir = convert_zip_to_parquet(input_path, cli_path=cli_path, output_dir=parquet_path_out)
@@ -271,23 +275,25 @@ def _generate_reports(blueprint, blueprint_rat, asset_groups, input_path, cli_pa
 
     print("[+] Validating workbook configuration against the solution...")
     initialize_database_structures(parquet_base_dir)
-    exceptions_report.validate_name_map(asset_mapping)
+    exceptions_report.validate_name_maps(name_map)
     exceptions_report.validate_unit_table(df_units)
     exceptions_report.validate_blueprint(blueprint, asset_groups)
-    exceptions_report.validate_contract_map(contract_rows)
+    exceptions_report.validate_contract_map(contract_factors, name_map)
 
     # Execute Standard Report if blueprint is provided
     if blueprint:
         std_output_path = os.path.join(dir_name, "Standard_Report.csv")
-        contract_map = [(plexos, label, factor) for plexos, label, factor in contract_rows if label.strip()]
-        execute_standard_report(parquet_base_dir, blueprint, asset_groups, std_output_path, years, unique_months, df_units, asset_mapping, contract_map)
+        execute_standard_report(parquet_base_dir, blueprint, asset_groups, std_output_path, years, unique_months, df_units, name_map, contract_factors)
         
     # Execute Timeslice Report if blueprint_rat is provided
     if blueprint_rat:
         rat_output_path = os.path.join(dir_name, "Ratings_Report.csv")
-        execute_timeslice_report(parquet_base_dir, blueprint_rat, asset_groups, rat_output_path, years, unique_months, df_units, asset_mapping)
+        execute_timeslice_report(parquet_base_dir, blueprint_rat, asset_groups, rat_output_path, years, unique_months, df_units, name_map)
         
     print("[+] All report generation complete.")
+
+    # Only now is it known which maptable entries renamed something
+    exceptions_report.validate_name_map_usage(name_map)
 
     # Written before SIT runs -- when SIT fails, these exceptions are usually the reason
     exceptions_report.write(dir_name)

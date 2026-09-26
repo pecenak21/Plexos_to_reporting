@@ -19,7 +19,7 @@ def _cached_parent_query(parent_query):
     # in process_nested_block/process_32_block. Cache it instead of re-hitting DuckDB.
     return duckdb.query(parent_query).df()
 
-def process_daily_block(parquet_base_dir, property_name, years, unique_months, class_name=None, is_rate=False, temporal_pattern="daily", asset_mapping=None, df_units=None, explicit_unit=None):
+def process_daily_block(parquet_base_dir, property_name, years, unique_months, class_name=None, is_rate=False, temporal_pattern="daily", name_map=None, df_units=None, explicit_unit=None):
     
     # 1. Pull the pivoted data
     df_pivoted = pull_pivoted_data(
@@ -40,9 +40,9 @@ def process_daily_block(parquet_base_dir, property_name, years, unique_months, c
     df_pivoted['Year'] = df_pivoted['Year'].astype(int)
     df_pivoted['Day_Id'] = df_pivoted['Day_Id'].astype(int)
 
-    if asset_mapping:
-        df_pivoted['Object_Name'] = df_pivoted['Object_Name'].map(asset_mapping).fillna(df_pivoted['Object_Name'])
-        
+    if name_map is not None:
+        df_pivoted['Object_Name'] = df_pivoted['Object_Name'].map(name_map.name)
+
         # If multiple Plexos names map to one RTSim name, group them and sum their metrics across dimensions
         dim_cols = ['Object_Name', 'band_id', 'Year', 'Day_Id']
         month_cols = [c for c in df_pivoted.columns if c not in dim_cols]
@@ -133,9 +133,12 @@ def process_daily_block(parquet_base_dir, property_name, years, unique_months, c
         block = pd.concat([header_row, df_final], axis=0)
         return pd.concat([block, spacer], axis=0)
 
-    # 6. Format into "Sub-table" structure
+    # 6. Format into "Sub-table" structure, in maptable order
+    groups = {name: group for (name,), group in df_work.groupby(['Object_Name'])}
+    assets = name_map.ordered(groups) if name_map is not None else list(groups)
     all_chunks = []
-    for asset, group in df_work.groupby(['Object_Name']):
+    for asset in assets:
+        group = groups[asset]
         sub_table = group.set_index('Day_Id')[sorted_cols]
         
         df_final = sub_table.reset_index()[sorted_cols + ['Day_Id']]
@@ -148,7 +151,7 @@ def process_daily_block(parquet_base_dir, property_name, years, unique_months, c
         # Create header and spacer
         header_row = pd.DataFrame(
             [[np.nan] * (len(sorted_cols) + 1)], 
-            index=[f"{asset[0]}"], 
+            index=[f"{asset}"],
             columns=sorted_cols + ['Day_Id']
         ).fillna("") 
         
@@ -164,17 +167,16 @@ def process_daily_block(parquet_base_dir, property_name, years, unique_months, c
     return pd.concat(all_chunks)
 
 
-def process_emissions_block(parquet_base_dir, gas_name, target_header, years, unique_months, df_units, class_name, temporal_pattern, is_rate=False, explicit_unit=None, asset_mapping=None):
+def process_emissions_block(parquet_base_dir, gas_name, target_header, years, unique_months, df_units, class_name, temporal_pattern, is_rate=False, explicit_unit=None, name_map=None):
 
     # Existing functionality preserved
     df_pivoted = pull_pivoted_data(parquet_base_dir, 'Production', unique_months, emission_gas_name=gas_name, is_rate=False)
     if df_pivoted.empty: return pd.DataFrame()
     
-    # Code to map the names to provided RTsim names
-    if asset_mapping:
-        df_pivoted['Object_Name'] = df_pivoted['Object_Name'].map(asset_mapping).fillna(df_pivoted['Object_Name'])
-        
     df_pivoted = df_pivoted.groupby('Object_Name')[list(unique_months)].sum()
+    # Map to report names: sums objects sharing a name, orders by maptable
+    if name_map is not None:
+        df_pivoted = name_map.arrange(df_pivoted)
 
     scale_factor, _ = get_automatic_scale_factor(parquet_base_dir, target_header, df_units, explicit_unit=explicit_unit)
     df_pivoted = df_pivoted * scale_factor
@@ -198,7 +200,7 @@ def process_emissions_block(parquet_base_dir, gas_name, target_header, years, un
 
     return df_grid
 
-def process_flat_block(parquet_base_dir, property_name, header_name, years, unique_months, df_units, category_list=None, class_name=None, is_rate=False, temporal_pattern="monthly", timeslice_name="All Periods", explicit_unit=None, asset_mapping=None, parent_name=None,testy=False):
+def process_flat_block(parquet_base_dir, property_name, header_name, years, unique_months, df_units, category_list=None, class_name=None, is_rate=False, temporal_pattern="monthly", timeslice_name="All Periods", explicit_unit=None, name_map=None, parent_name=None,testy=False):
 
     df_pivoted = pull_pivoted_data(parquet_base_dir, property_name, unique_months, category_list=category_list, class_name=class_name, is_rate=is_rate, timeslice_name=timeslice_name, parent_name=parent_name)
 
@@ -206,11 +208,10 @@ def process_flat_block(parquet_base_dir, property_name, header_name, years, uniq
         print(f"[DEBUG] ---> Result was EMPTY for property '{property_name}' under parent '{parent_name}'.")
         return pd.DataFrame()
 
-    # Code to map the names to provided RTsim names
-    if asset_mapping:
-        df_pivoted['Object_Name'] = df_pivoted['Object_Name'].map(asset_mapping).fillna(df_pivoted['Object_Name'])
-    
     df_pivoted = df_pivoted.groupby('Object_Name')[list(unique_months)].sum()
+    # Map to report names: sums objects sharing a name, orders by maptable
+    if name_map is not None:
+        df_pivoted = name_map.arrange(df_pivoted)
     
     # Pass explicit_unit instead of header_name to your scale factor function
     scale_factor, _ = get_automatic_scale_factor(parquet_base_dir, property_name, df_units, explicit_unit=explicit_unit, class_name=class_name, parent_name=parent_name, is_rate=is_rate)
@@ -237,16 +238,15 @@ def process_flat_block(parquet_base_dir, property_name, header_name, years, uniq
     df_grid.index.name = ''
     return df_grid
 
-def process_ratings_block(parquet_base_dir, property_name, alias, years, unique_months, df_units, category_list=None, class_name=None, is_rate=False, timeslice_name="All Periods", explicit_unit=None, asset_mapping=None):
+def process_ratings_block(parquet_base_dir, property_name, alias, years, unique_months, df_units, category_list=None, class_name=None, is_rate=False, timeslice_name="All Periods", explicit_unit=None, name_map=None):
     # Reuse pull_pivoted_data since it fetches the raw matrix correctly
     df_pivoted = pull_pivoted_data(parquet_base_dir, property_name, unique_months, category_list=category_list, class_name=class_name, is_rate=is_rate, timeslice_name=timeslice_name)
     if df_pivoted.empty: return pd.DataFrame()
     
-    # Code to map the names to provided RTsim names
-    if asset_mapping:
-        df_pivoted['Object_Name'] = df_pivoted['Object_Name'].map(asset_mapping).fillna(df_pivoted['Object_Name'])
-
     df_pivoted = df_pivoted.groupby('Object_Name')[list(unique_months)].sum()
+    # Map to report names: sums objects sharing a name, orders by maptable
+    if name_map is not None:
+        df_pivoted = name_map.arrange(df_pivoted)
     
     # Apply automatic unit scaling
     scale_factor, _ = get_automatic_scale_factor(parquet_base_dir, property_name, df_units, explicit_unit=explicit_unit, class_name=class_name, is_rate=is_rate)
@@ -299,7 +299,35 @@ def build_rate_totals(df_pivot, years, unique_months):
     final_columns.append('Total')
     return df_pivot[final_columns], final_columns
 
-def process_nested_block(parquet_base_dir, property_name, parent_name, child_name, header_name, years, unique_months, df_units, category_list=None, class_name=None, is_rate=False, temporal_pattern="monthly", timeslice_name="All Periods", explicit_unit=None, asset_mapping=None): 
+def arrange_section(blocks, name_map, years, unique_months, is_rate):
+    """
+    Combine a section's name-indexed blocks and put the maptables over the result.
+
+    This is where rows produced by different blueprint rows meet -- System Summary's
+    one-line blocks, for instance -- so labels mapped here (maptable_summary) are summed
+    and ordered at section level. The per-row year
+    totals and the section's Total row are then rebuilt from the months.
+    """
+    # Each block may bring its own Total row; RTSim shows a single one for the whole section
+    total_labels = [i for b in blocks for i in b.index if str(i).strip() == 'Total']
+    body = pd.concat([b[[str(i).strip() != 'Total' for i in b.index]] for b in blocks], axis=0)
+    if name_map is not None:
+        body = name_map.arrange(body)
+
+    months = [m for m in unique_months if m in body.columns]
+    if months:
+        build_totals = build_rate_totals if is_rate else build_sum_totals
+        index_name = body.index.name
+        body, _ = build_totals(body[months].copy(), years, months)
+        body.index.name = index_name
+
+    if total_labels:
+        total = body.where(body != 0).mean(axis=0).fillna(0) if is_rate else body.sum(axis=0)
+        body = pd.concat([body, total.to_frame(total_labels[0]).T], axis=0)
+    return body
+
+
+def process_nested_block(parquet_base_dir, property_name, parent_name, child_name, header_name, years, unique_months, df_units, category_list=None, class_name=None, is_rate=False, temporal_pattern="monthly", timeslice_name="All Periods", explicit_unit=None, name_map=None): 
     
     cat_items = category_list if isinstance(category_list, list) else [category_list]
     valid_cats = [str(cat).strip() for cat in cat_items if cat is not None and str(cat).lower().strip() != 'all']
@@ -319,7 +347,7 @@ def process_nested_block(parquet_base_dir, property_name, parent_name, child_nam
         
     all_parents = result['ParentObjectName'].tolist()
 
-    mapped_parents = [asset_mapping.get(item, item) for item in all_parents]
+    mapped_parents = [name_map.name(item) if name_map is not None else item for item in all_parents]
 
     combined_rows = []
     for idx, parent in enumerate(all_parents): 
@@ -329,7 +357,7 @@ def process_nested_block(parquet_base_dir, property_name, parent_name, child_nam
         else:
             sub_header = f"{mapped_parents[idx]}"
 
-        df_data = process_flat_block(parquet_base_dir, property_name, header_name, years, unique_months, df_units, category_list=None, class_name=None, is_rate=is_rate, temporal_pattern=temporal_pattern, timeslice_name="All Periods", explicit_unit=explicit_unit, asset_mapping=asset_mapping, parent_name=parent)
+        df_data = process_flat_block(parquet_base_dir, property_name, header_name, years, unique_months, df_units, category_list=None, class_name=None, is_rate=is_rate, temporal_pattern=temporal_pattern, timeslice_name="All Periods", explicit_unit=explicit_unit, name_map=name_map, parent_name=parent)
         
         if not df_data.empty:
             df_data = df_data.reset_index()
@@ -352,7 +380,7 @@ def process_nested_block(parquet_base_dir, property_name, parent_name, child_nam
 
 
 # bespoke code for effluents summary -- see note in create_reports.py where this is dispatched
-def process_32_block(parquet_base_dir, property_name, parent_name, child_name, header_name, years, unique_months, df_units, category_list=None, class_name=None, is_rate=False, temporal_pattern="monthly-summary", timeslice_name="All Periods", explicit_unit=None, asset_mapping=None):
+def process_32_block(parquet_base_dir, property_name, parent_name, child_name, header_name, years, unique_months, df_units, category_list=None, class_name=None, is_rate=False, temporal_pattern="monthly-summary", timeslice_name="All Periods", explicit_unit=None, name_map=None):
     """
     Custom block generator for '( 32 ) Total Effluents by Type lbs'.
 
@@ -380,13 +408,13 @@ def process_32_block(parquet_base_dir, property_name, parent_name, child_name, h
         return pd.DataFrame()
 
     all_parents = result['ParentObjectName'].tolist()
-    mapped_parents = [asset_mapping.get(item, item) for item in all_parents]
+    mapped_parents = [name_map.name(item) if name_map is not None else item for item in all_parents]
 
     combined_rows = []
     for idx, parent in enumerate(all_parents):
         sub_header = f"Total Effluents (lb) -- {mapped_parents[idx]}"
 
-        df_data = process_flat_block(parquet_base_dir, property_name, header_name, years, unique_months, df_units, category_list=None, class_name=None, is_rate=is_rate, temporal_pattern=temporal_pattern, timeslice_name="All Periods", explicit_unit=explicit_unit, asset_mapping=asset_mapping, parent_name=parent)
+        df_data = process_flat_block(parquet_base_dir, property_name, header_name, years, unique_months, df_units, category_list=None, class_name=None, is_rate=is_rate, temporal_pattern=temporal_pattern, timeslice_name="All Periods", explicit_unit=explicit_unit, name_map=name_map, parent_name=parent)
 
         if not df_data.empty:
             month_cols = list(df_data.columns)
@@ -404,7 +432,7 @@ def process_32_block(parquet_base_dir, property_name, parent_name, child_name, h
 
 
     # bespoke code for fuels
-def process_3_block(parquet_base_dir, parent_name, child_name, header_name, years, unique_months, df_units, category_list=None, class_name=None, is_rate=False, temporal_pattern="monthly", timeslice_name="All Periods", explicit_unit=None, asset_mapping=None):
+def process_3_block(parquet_base_dir, parent_name, child_name, header_name, years, unique_months, df_units, category_list=None, class_name=None, is_rate=False, temporal_pattern="monthly", timeslice_name="All Periods", explicit_unit=None, name_map=None):
     """
     Custom block generator for '( 3 ) Thermal Unit Fuel Use (MBTU)'
     Takes flat outputs for Fuel Offtake and Start Fuel Offtake and formats them 
@@ -415,7 +443,7 @@ def process_3_block(parquet_base_dir, parent_name, child_name, header_name, year
         parquet_base_dir, "Fuel Offtake", header_name, years, unique_months, 
         df_units=df_units, category_list=category_list, class_name=class_name, is_rate=is_rate, 
         temporal_pattern=temporal_pattern, timeslice_name=timeslice_name, 
-        explicit_unit=explicit_unit, asset_mapping=asset_mapping, parent_name=None
+        explicit_unit=explicit_unit, name_map=name_map, parent_name=None
     )
 
     # 2. Pull the flat block for "Start Fuel Offtake" across all generators
@@ -423,7 +451,7 @@ def process_3_block(parquet_base_dir, parent_name, child_name, header_name, year
         parquet_base_dir, "Start Fuel Offtake", header_name, years, unique_months, 
         df_units=df_units, category_list=category_list, class_name=class_name, is_rate=is_rate, 
         temporal_pattern=temporal_pattern, timeslice_name=timeslice_name, 
-        explicit_unit=explicit_unit, asset_mapping=asset_mapping, parent_name=None
+        explicit_unit=explicit_unit, name_map=name_map, parent_name=None
     )
 
     if df_fuel.empty:
@@ -476,14 +504,15 @@ def process_3_block(parquet_base_dir, parent_name, child_name, header_name, year
 
     return pd.concat(combined_rows, ignore_index=True) if combined_rows else pd.DataFrame()
 
-def process_23_block(parquet_base_dir, years, unique_months, contract_map):
+def process_23_block(parquet_base_dir, years, unique_months, contract_factors, name_map=None):
     """
     Custom block for '( 23 ) Contract Fuel Use'.
 
-    One row per fuel mapped in the Contract_name_map sheet, converted from Plexos
-    offtake (MMBtu) into that contract's own unit with the sheet's factor, and labelled
-    with RTSim's fixed-width 'Name        (Unit  )' form. RTSim sums rows of different
-    units into its Total, so this does the same.
+    One row per fuel listed on the Contract_factors sheet, converted from Plexos
+    offtake (MMBtu) into that contract's own unit with the sheet's factor. The fuel is
+    then renamed to RTSim's fixed-width 'Name        (Unit  )' label by the maptables
+    (maptable_Contracts), which also sums fuels sharing a contract. RTSim sums rows of
+    different units into its Total, so this does the same.
     """
     months = list(unique_months)
     # Fuel offtake is reported once under System.Fuels and again per plant under
@@ -496,13 +525,15 @@ def process_23_block(parquet_base_dir, years, unique_months, contract_map):
         by_fuel = by_fuel * 1000
 
     rows = {}
-    for plexos_name, report_label, factor in contract_map:
+    for plexos_name, factor in contract_factors:
         series = by_fuel.loc[plexos_name] if plexos_name in by_fuel.index else pd.Series(0.0, index=months)
-        rows[report_label] = rows.get(report_label, 0.0) + series * factor
+        rows[plexos_name] = rows.get(plexos_name, 0.0) + series * factor
     if not rows:
         return pd.DataFrame()
 
     df_contracts = pd.DataFrame.from_dict(rows, orient='index')[months]
+    if name_map is not None:
+        df_contracts = name_map.arrange(df_contracts)
     df_grid, _ = build_sum_totals(df_contracts, years, unique_months)
     df_grid = df_grid.copy()
     df_grid.loc['  Total '] = df_grid.sum(axis=0)
@@ -510,16 +541,21 @@ def process_23_block(parquet_base_dir, years, unique_months, contract_map):
     return df_grid
 
 
-def export_block_to_csv(file_handle, header_title, df_block, include_index=True, include_header=True):
+def export_block_to_csv(file_handle, header_title, df_block, include_index=True, include_header=True, name_map=None):
     """
     Writes section titles, column headers, and pure numeric data directly 
     to a CSV file while explicitly respecting index and header flags.
+
+    Every text cell -- title, headers, row labels, label cells inside bespoke blocks --
+    goes through the maptables on the way out, so any printed string can be renamed
+    from the workbook.
     """
     writer = csv.writer(file_handle)
+    rename = name_map.cell if name_map is not None else (lambda v: v)
     
     # 1. Write Section Header (e.g., "( 3 ) Thermal Unit Fuel Use (MBTU)")
     if header_title:
-        writer.writerow([header_title])
+        writer.writerow([rename(header_title)])
     
     if not df_block.empty:
         # 2. Write Column Headers (only if include_header=True)
@@ -532,13 +568,13 @@ def export_block_to_csv(file_handle, header_title, df_block, include_index=True,
             else:
                 headers = list(df_block.columns)
                 
-            writer.writerow(headers)
+            writer.writerow([rename(h) for h in headers])
         
         # 3. Write Data Rows
         for idx, row in df_block.iterrows():
             # Conditionally include index column(s)
             if include_index:
-                idx_vals = list(idx) if isinstance(idx, tuple) else [idx]
+                idx_vals = [rename(i) for i in (idx if isinstance(idx, tuple) else [idx])]
             else:
                 idx_vals = []
             
@@ -555,7 +591,7 @@ def export_block_to_csv(file_handle, header_title, df_block, include_index=True,
                     try:
                         formatted_values.append(round(float(v), 4))
                     except (TypeError, ValueError):
-                        formatted_values.append(str(v))
+                        formatted_values.append(rename(str(v)))
             
             writer.writerow(idx_vals + formatted_values)
             

@@ -67,71 +67,97 @@ def _distinct_objects():
     return by_name, by_class
 
 
-def validate_name_map(asset_mapping, coverage_threshold=0.5):
-    """Both directions of the Plexos <-> RTSim name map.
+def validate_name_maps(name_map, coverage_threshold=0.5):
+    """The maptable sheets on their own and against the solution's object names.
 
-    Unmapped names are only reported for the classes the map actually covers. The map
-    is generator/battery oriented, so auditing every class would bury the real gaps --
-    and a class can't be judged 'covered' by a single hit either, since names collide
-    across classes ('External' is both a Generator and a Fuel). A class is audited only
-    once `coverage_threshold` of its objects are mapped.
+    Maptables are class-blind: a listed name renames every object and every report cell
+    spelled that way. Unmapped names are only audited for the classes the maptables
+    actually cover. The maps are generator/battery oriented, so auditing every class
+    would bury the real gaps -- and a class can't be judged 'covered' by a single hit
+    either, since names collide across classes ('External' is both a Generator and a
+    Fuel). A class is audited only once `coverage_threshold` of its objects are mapped.
     """
-    by_name, by_class = _distinct_objects()
-
-    mapped_plexos = {}
-    for plexos_name, rtsim_name in asset_mapping.items():
-        if pd.isna(plexos_name) or str(plexos_name).strip() == '':
-            continue
-        mapped_plexos[str(plexos_name).strip()] = str(rtsim_name).strip() if pd.notna(rtsim_name) else ''
-
-    # Map entries that match no object in the solution at all
-    orphans = sorted(name for name in mapped_plexos if name not in by_name)
-    if orphans:
-        record(
-            WARN, "NAME_MAP",
-            f"{len(orphans)} name-map entr(ies) match no object in the Plexos solution "
-            f"(mapping is unused -- check for typos or retired units)",
-            [f"{name}  ->  {mapped_plexos[name]}" for name in orphans],
-        )
-
-    covered_classes = []
-    for cls, names in by_class.items():
-        if not names:
-            continue
-        if len(names & set(mapped_plexos)) / len(names) >= coverage_threshold:
-            covered_classes.append(cls)
-
-    if not covered_classes:
-        record(ERROR, "NAME_MAP", "No Plexos class is meaningfully covered by the name map -- the "
-                                  "mapping sheet and this solution appear unrelated.")
+    for sheet in name_map.legacy_sheets:
+        record(ERROR, "NAME_MAP",
+               f"Sheet '{sheet}' is no longer read. Mapping sheets must be named 'maptable...' "
+               f"(e.g. maptable_Generators); rename it or its names print as PLEXOS has them")
+    if not name_map.sheets:
+        record(WARN, "NAME_MAP", "No 'maptable' sheets found -- every name prints as PLEXOS has it")
         return
 
-    unmapped = []
-    for cls in sorted(covered_classes):
-        for name in sorted(by_class.get(cls, set())):
-            if name not in mapped_plexos:
-                unmapped.append(f"{name}  [{cls}]")
-    if unmapped:
-        record(
-            WARN, "NAME_MAP",
-            f"{len(unmapped)} Plexos object(s) in mapped class(es) {sorted(covered_classes)} "
-            f"have no name-map entry -- they keep their Plexos name in the reports",
-            unmapped,
-        )
+    lookup = name_map.lookup
+    by_name, by_class = _distinct_objects()
 
-    # Several Plexos names collapsing onto one RTSim name are summed together silently
+    # The same name listed twice: the later listing silently wins
+    duplicates = []
+    for source, listings in sorted(name_map.duplicates().items()):
+        used = listings[-1]
+        others = "; ".join(f"{e.sheet} row {e.row} -> '{e.target}'" for e in listings[:-1])
+        duplicates.append(f"'{source}': used {used.sheet} row {used.row} -> '{used.target}'  (ignored: {others})")
+    if duplicates:
+        record(WARN, "NAME_MAP",
+               f"{len(duplicates)} name(s) are listed more than once in the maptables -- the last "
+               f"listing (sheets in workbook order, rows top to bottom) is the one used",
+               duplicates)
+
+    collisions = [f"'{name}' [{', '.join(sorted(by_name[name]))}] -> '{target}'"
+                  for name, target in sorted(lookup.items()) if len(by_name.get(name, ())) > 1]
+    if collisions:
+        record(WARN, "NAME_MAP",
+               f"{len(collisions)} mapped name(s) belong to more than one Plexos class -- maptables "
+               f"ignore class, so every object with that name is renamed the same way",
+               collisions)
+
+    # A -> B and B -> C: the report pass renames the already-mapped B a second time
+    chains = [f"'{source}' -> '{target}' -> '{lookup[target.strip()]}'"
+              for source, target in sorted(lookup.items())
+              if target.strip() in lookup and lookup[target.strip()] != target]
+    if chains:
+        record(WARN, "NAME_MAP",
+               f"{len(chains)} mapped name(s) are themselves mapped again -- the report shows the last name in the chain",
+               chains)
+
+    empties = [f"{sheet}: '{target}'" for sheet in name_map.sheets for target in name_map.empty[sheet]]
+    if empties:
+        record(INFO, "NAME_MAP",
+               f"{len(empties)} maptable name(s) have no mapping defined (column 2 blank) -- they are not "
+               f"printed in the reports",
+               empties)
+
+    covered_classes = [cls for cls, names in by_class.items()
+                       if names and len(names & set(lookup)) / len(names) >= coverage_threshold]
+    unmapped = [f"{name}  [{cls}]" for cls in sorted(covered_classes)
+                for name in sorted(by_class.get(cls, set())) if name not in lookup]
+    if unmapped:
+        record(WARN, "NAME_MAP",
+               f"{len(unmapped)} Plexos object(s) in mapped class(es) {sorted(covered_classes)} "
+               f"have no maptable entry -- they keep their Plexos name in the reports",
+               unmapped)
+
+    # Several Plexos names collapsing onto one report name are summed together silently
     collisions = defaultdict(list)
-    for plexos_name, rtsim_name in mapped_plexos.items():
-        if rtsim_name and plexos_name in by_name:
-            collisions[rtsim_name].append(plexos_name)
+    for source, target in lookup.items():
+        if source in by_name:
+            collisions[target].append(source)
     merged = {k: sorted(v) for k, v in collisions.items() if len(v) > 1}
     if merged:
-        record(
-            INFO, "NAME_MAP",
-            f"{len(merged)} RTSim name(s) receive more than one Plexos object -- their values "
-            f"are summed together",
-            [f"{rtsim} <- {', '.join(plexos)}" for rtsim, plexos in sorted(merged.items())],
-        )
+        record(INFO, "NAME_MAP",
+               f"{len(merged)} report name(s) receive more than one Plexos object -- their values "
+               f"are summed together",
+               [f"{target} <- {', '.join(sources)}" for target, sources in sorted(merged.items())])
+
+
+def validate_name_map_usage(name_map):
+    """After the reports are built: maptable entries that renamed nothing."""
+    by_name, _ = _distinct_objects()
+    unused = [f"{e.sheet} row {e.row}: '{e.source}' -> '{e.target}'"
+              for e in name_map.entries
+              if e.source and e.source not in name_map.used_sources and e.source not in by_name]
+    if unused:
+        record(WARN, "NAME_MAP",
+               f"{len(unused)} maptable entr(ies) match nothing in the solution or the reports -- check "
+               f"for typos, retired units, or a report label that has changed",
+               unused)
 
 
 def _rate_text(value):
@@ -271,39 +297,39 @@ def validate_blueprint(blueprint, asset_groups):
                sorted(empty_groups))
 
 
-def validate_contract_map(contract_rows):
-    """Section 23 contract table: fuels it misses, entries that match nothing, unusable factors."""
-    if not contract_rows:
+def validate_contract_map(contract_factors, name_map):
+    """Section 23: fuels without a factor, factors that match nothing, unusable factors, unlabelled fuels."""
+    if not contract_factors:
         return
     fuels = set(duckdb.query(
         "SELECT DISTINCT TRIM(ChildObjectName) AS n FROM mem_fki WHERE LOWER(ChildClassName) = 'fuel'"
     ).df()['n'])
-    listed = {plexos for plexos, _, _ in contract_rows}
+    listed = {plexos for plexos, _ in contract_factors}
 
     not_listed = sorted(fuels - listed)
     if not_listed:
         record(WARN, "CONTRACT_MAP",
-               f"{len(not_listed)} Plexos fuel(s) are not listed in Contract_name_map -- left out of section 23",
+               f"{len(not_listed)} Plexos fuel(s) are not listed in Contract_factors -- left out of section 23",
                not_listed)
 
     stale = sorted(listed - fuels)
     if stale:
         record(WARN, "CONTRACT_MAP",
-               f"{len(stale)} Contract_name_map entr(ies) match no Plexos fuel -- their section 23 rows are all zero",
+               f"{len(stale)} Contract_factors entr(ies) match no Plexos fuel -- their section 23 rows are all zero",
                stale)
 
-    unmapped = sorted(plexos for plexos, label, _ in contract_rows if not label.strip() and plexos in fuels)
-    if unmapped:
+    unlabelled = sorted(plexos for plexos in listed if plexos in fuels and plexos not in name_map.lookup)
+    if unlabelled:
         record(INFO, "CONTRACT_MAP",
-               f"{len(unmapped)} Plexos fuel(s) are listed without an RTSim contract -- omitted from section 23",
-               unmapped)
+               f"{len(unlabelled)} fuel(s) in Contract_factors have no maptable entry -- they appear in "
+               f"section 23 under their Plexos name",
+               unlabelled)
 
-    bad_factor = sorted(f"{plexos} -> {label.strip()} (factor {factor})"
-                        for plexos, label, factor in contract_rows
-                        if label.strip() and (pd.isna(factor) or factor == 0))
+    bad_factor = sorted(f"{plexos} (factor {factor})" for plexos, factor in contract_factors
+                        if pd.isna(factor) or factor == 0)
     if bad_factor:
         record(ERROR, "CONTRACT_MAP",
-               f"{len(bad_factor)} mapped contract(s) have a blank or zero ConversionFactor -- those rows report nothing",
+               f"{len(bad_factor)} fuel(s) have a blank or zero ConversionFactor -- those rows report nothing",
                bad_factor)
 
 
