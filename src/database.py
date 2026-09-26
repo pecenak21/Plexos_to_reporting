@@ -36,25 +36,81 @@ def initialize_database_structures(base_dir):
         _db_initialized = True
 
 
+def _key_filter(property_name, class_name=None, parent_name=None):
+    """mem_fki conditions (alias f) selecting one property's series, optionally narrowed by class and parent object."""
+    conditions = [f"LOWER(TRIM(f.PropertyName)) = '{str(property_name).lower().strip()}'"]
+    if class_name and str(class_name).lower().strip() != 'none':
+        conditions.append(f"LOWER(TRIM(f.ChildClassName)) = '{str(class_name).lower().strip()}'")
+    if parent_name:
+        conditions.append(f"LOWER(TRIM(f.ParentObjectName)) = '{str(parent_name).lower().strip()}'")
+    return " AND ".join(conditions)
+
+
 @functools.lru_cache(maxsize=None)
-def _lookup_db_unit(base_dir, lookup_prop_lower):
-    # mem_fki is static for the lifetime of a report run, so the same
-    # (base_dir, property) pair always resolves to the same unit -- and this
-    # gets called once per property per parent object in nested blocks.
-    query = f"SELECT unitValue FROM mem_fki WHERE LOWER(TRIM(propertyName)) = '{lookup_prop_lower}' LIMIT 1;"
-    row = duckdb.query(query).fetchone()
-    return row[0].strip() if row else ""
+def resolve_period_type(property_name, class_name=None, parent_name=None, temporal_pattern="monthly", is_rate=False):
+    """
+    The one Plexos period type a query reads from.
+
+    A solution stores each property at several resolutions (Interval, Day, Month, Year),
+    each a separate series in mem_fki. Mixing them in one pull adds the monthly and annual
+    totals on top of the summed intervals, so every query reads exactly one.
+
+    Summed properties read Plexos's own Day (daily patterns) or Month totals. Rate
+    properties are averaged from Interval values instead: Plexos's summary value for a
+    rate is not always that average -- a renewable's monthly Capacity Factor is 100%
+    against its available capacity, where the hourly average is ~40%.
+    """
+    summary = "day" if temporal_pattern in ("daily", "daily-summary") else "month"
+    order = ["interval", summary] if is_rate else [summary, "interval"]
+    available = {r[0] for r in duckdb.query(
+        f"SELECT DISTINCT LOWER(TRIM(f.PeriodTypeName)) FROM mem_fki f WHERE {_key_filter(property_name, class_name, parent_name)}"
+    ).fetchall()}
+    for period_type in order:
+        if period_type in available:
+            if period_type != order[0]:
+                exceptions_report.record_period_fallback(property_name, class_name, order[0], period_type)
+            return period_type
+    return order[0]
 
 
-def get_automatic_scale_factor(base_dir, property_name, df_units, explicit_unit):
+@functools.lru_cache(maxsize=None)
+def _lookup_db_unit(base_dir, lookup_prop, class_name=None, parent_name=None, period_type="month"):
+    # mem_fki is static for the lifetime of a report run, so the same key always resolves
+    # to the same unit -- and this gets called once per property per parent object in
+    # nested blocks. The unit differs by period type (MW per interval, GWh per month) and
+    # by class/membership (Offtake is BBtu for a generator, 1000·MMBTU for the system),
+    # so it is looked up on the same key the data is pulled with.
+    query = f"""SELECT DISTINCT TRIM(f.UnitValue) FROM mem_fki f
+                WHERE {_key_filter(lookup_prop, class_name, parent_name)}
+                  AND LOWER(TRIM(f.PeriodTypeName)) = '{period_type}'
+                ORDER BY 1"""
+    units = [r[0] for r in duckdb.query(query).fetchall() if r[0]]
+    if len(units) > 1:
+        exceptions_report.record_mixed_units(lookup_prop, class_name, units)
+    return units[0] if units else ""
+
+
+def get_db_unit(base_dir, property_name, class_name=None, parent_name=None, temporal_pattern="monthly", is_rate=False):
+    """Unit of the series pull_pivoted_data reads for the same arguments."""
     initialize_database_structures(base_dir)
+    period_type = resolve_period_type(property_name, class_name, parent_name, temporal_pattern, bool(is_rate))
+    return _lookup_db_unit(base_dir, property_name, class_name, parent_name, period_type)
+
+
+def get_automatic_scale_factor(base_dir, property_name, df_units, explicit_unit, class_name=None, parent_name=None, temporal_pattern="monthly", is_rate=False):
     lookup_prop = property_name[0] if isinstance(property_name, list) else property_name
 
-    # Get DB Unit
-    db_unit = _lookup_db_unit(base_dir, lookup_prop.lower().strip())
+    # Get DB Unit, for the same series the data was pulled from
+    db_unit = get_db_unit(base_dir, lookup_prop, class_name, parent_name, temporal_pattern, is_rate)
 
     # Target Unit is now strictly the explicit unit passed from the blueprint
     target_unit = str(explicit_unit).strip() if explicit_unit and str(explicit_unit).strip().lower() != 'nan' else ""
+    if not target_unit:
+        # A blank Unit cell means "as Plexos reports it", which used to be the interval
+        # unit ($, MW, lb). Monthly series come in coarser units ($000, GWh, ton), so
+        # convert back to the interval unit to keep those rows on the scale they had.
+        period_type = resolve_period_type(lookup_prop, class_name, parent_name, temporal_pattern, bool(is_rate))
+        target_unit = _lookup_db_unit(base_dir, lookup_prop, class_name, parent_name, "interval") if period_type != "interval" else db_unit
 
     # Lookup in the provided df_units
     match = df_units[
@@ -116,7 +172,11 @@ def pull_pivoted_data(base_dir, property_name, unique_months, category_list=None
             sub_conditions.append(f"LOWER(TRIM(f.ChildObjectCategoryName)) IN ({placeholders})")
 
     sub_conditions.append(f"LOWER(TRIM(f.TimesliceName)) = '{timeslice_name.lower().strip()}'")
-    
+
+    # Read one resolution only -- see resolve_period_type
+    period_type = resolve_period_type(property_name, class_name, parent_name, temporal_pattern, bool(is_rate))
+    sub_conditions.append(f"LOWER(TRIM(f.PeriodTypeName)) = '{period_type}'")
+
     master_filter = " AND ".join(sub_conditions)
     
     # Override filters if specifically looking for nested

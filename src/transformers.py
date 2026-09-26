@@ -9,7 +9,7 @@ import csv
 import functools
 
 # Note: Ensure BAND_MAP and BANDS_ORDERED are imported or defined as per your project
-from database import pull_pivoted_data, get_automatic_scale_factor
+from database import pull_pivoted_data, get_automatic_scale_factor, get_db_unit
 
 
 @functools.lru_cache(maxsize=None)
@@ -19,7 +19,7 @@ def _cached_parent_query(parent_query):
     # in process_nested_block/process_32_block. Cache it instead of re-hitting DuckDB.
     return duckdb.query(parent_query).df()
 
-def process_daily_block(parquet_base_dir, property_name, years, unique_months, class_name=None, is_rate=False, temporal_pattern="daily", asset_mapping=None):
+def process_daily_block(parquet_base_dir, property_name, years, unique_months, class_name=None, is_rate=False, temporal_pattern="daily", asset_mapping=None, df_units=None, explicit_unit=None):
     
     # 1. Pull the pivoted data
     df_pivoted = pull_pivoted_data(
@@ -48,6 +48,12 @@ def process_daily_block(parquet_base_dir, property_name, years, unique_months, c
         month_cols = [c for c in df_pivoted.columns if c not in dim_cols]
         df_pivoted = df_pivoted.groupby(dim_cols, as_index=False)[month_cols].sum()
     # --------------------------------------
+
+    # Daily series come in Plexos's summary units ($000, 1000·MMBTU), so convert like the monthly blocks
+    if df_units is not None:
+        scale_factor, _ = get_automatic_scale_factor(parquet_base_dir, property_name, df_units, explicit_unit=explicit_unit, class_name=class_name, temporal_pattern=temporal_pattern, is_rate=is_rate)
+        value_cols = [c for c in df_pivoted.columns if c not in ('Object_Name', 'band_id', 'Year', 'Day_Id')]
+        df_pivoted[value_cols] = df_pivoted[value_cols] * scale_factor
 
     # 3. Densification
     df_indexed = df_pivoted.set_index(['Object_Name', 'band_id', 'Year', 'Day_Id'])
@@ -207,9 +213,9 @@ def process_flat_block(parquet_base_dir, property_name, header_name, years, uniq
     df_pivoted = df_pivoted.groupby('Object_Name')[list(unique_months)].sum()
     
     # Pass explicit_unit instead of header_name to your scale factor function
-    scale_factor, _ = get_automatic_scale_factor(parquet_base_dir, property_name, df_units, explicit_unit=explicit_unit)
+    scale_factor, _ = get_automatic_scale_factor(parquet_base_dir, property_name, df_units, explicit_unit=explicit_unit, class_name=class_name, parent_name=parent_name, is_rate=is_rate)
     df_pivoted = df_pivoted * scale_factor
-    
+
     # When creating df_grid, ensure it's a fresh object
     if is_rate:
         df_grid, _ = build_rate_totals(df_pivoted, years, unique_months)
@@ -243,9 +249,9 @@ def process_ratings_block(parquet_base_dir, property_name, alias, years, unique_
     df_pivoted = df_pivoted.groupby('Object_Name')[list(unique_months)].sum()
     
     # Apply automatic unit scaling
-    scale_factor, _ = get_automatic_scale_factor(parquet_base_dir, property_name, df_units, explicit_unit=explicit_unit)
+    scale_factor, _ = get_automatic_scale_factor(parquet_base_dir, property_name, df_units, explicit_unit=explicit_unit, class_name=class_name, is_rate=is_rate)
     df_pivoted = df_pivoted * scale_factor
-    
+
     # Build totals grid without keeping intermediate total rows
     if is_rate:
         df_grid, _ = build_rate_totals(df_pivoted, years, unique_months)
@@ -435,7 +441,9 @@ def process_3_block(parquet_base_dir, parent_name, child_name, header_name, year
 
     month_cols = list(unique_months)
     combined_rows = []
-    col_names = [''] + month_cols
+    # Month columns plus the Tot-<year> and grand Total columns, in build_sum_totals order
+    _, total_cols = build_sum_totals(pd.DataFrame(columns=month_cols, dtype=float), years, month_cols)
+    col_names = [''] + total_cols
 
     # Loop through each generator present in the Fuel Offtake dataset
     for gen_name in fuel_dict.keys():
@@ -449,14 +457,14 @@ def process_3_block(parquet_base_dir, parent_name, child_name, header_name, year
         # Parent total is primary + startup (since secondary and topping are 0)
         parent_total = primary_vals + startup_vals
 
-        # Construct rows matching your required format
-        row_parent = [gen_name] + list(parent_total.values)
-        row_prim   = ["        (Primary)"] + list(primary_vals.values)
-        row_sec    = ["        (Secondary)"] + list(secondary_vals.values)
-        row_start  = ["        (Startup)"] + list(startup_vals.values)
-        row_top    = ["        (Topping)"] + list(topping_vals.values)
+        # Construct rows matching your required format, then add the annual and grand totals
+        labels = [gen_name, "        (Primary)", "        (Secondary)", "        (Startup)", "        (Topping)"]
+        df_months = pd.DataFrame([parent_total, primary_vals, secondary_vals, startup_vals, topping_vals],
+                                 index=range(len(labels)), columns=month_cols).astype(float)
+        df_totals, _ = build_sum_totals(df_months, years, month_cols)
+        df_totals.insert(0, '', labels)
 
-        block_df = pd.DataFrame([row_parent, row_prim, row_sec, row_start, row_top], columns=col_names)
+        block_df = df_totals[col_names].reset_index(drop=True)
         
         # Format matching your standard block output (Header row + Data + Spacer)
         header_vals = pd.DataFrame([col_names], columns=col_names)
@@ -482,6 +490,10 @@ def process_23_block(parquet_base_dir, years, unique_months, contract_map):
     # Generator.Fuels; reading only the System membership avoids counting each fuel twice.
     df_pivoted = pull_pivoted_data(parquet_base_dir, 'Offtake', unique_months, class_name='Fuel', parent_name='System')
     by_fuel = df_pivoted.groupby('Object_Name')[months].sum() if not df_pivoted.empty else pd.DataFrame(columns=months)
+    # The contract factors convert from MMBtu. Monthly offtake is reported in thousands
+    # ('1000·MMBTU', or '1000·-' for fuels not measured in MMBtu), interval offtake in units.
+    if get_db_unit(parquet_base_dir, 'Offtake', class_name='Fuel', parent_name='System').startswith('1000'):
+        by_fuel = by_fuel * 1000
 
     rows = {}
     for plexos_name, report_label, factor in contract_map:

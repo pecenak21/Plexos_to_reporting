@@ -319,6 +319,18 @@ def record_nan_scale(property_name, db_unit, target_unit):
            f"every value in that block becomes blank")
 
 
+def record_period_fallback(property_name, class_name, preferred, used):
+    record(WARN, "PERIOD_TYPE",
+           f"Property '{property_name}' (class '{class_name}') is not reported at {preferred.title()} "
+           f"resolution; its values were built from {used.title()} data instead")
+
+
+def record_mixed_units(property_name, class_name, units):
+    record(WARN, "UNIT_CONVERSION",
+           f"Property '{property_name}' (class '{class_name}') is reported in more than one unit "
+           f"({', '.join(units)}); '{units[0]}' was used to pick the conversion rule")
+
+
 def record_no_data(header, property_name, class_name):
     record(WARN, "NO_DATA",
            f"Section '{header}': no data returned for property '{property_name}' (class '{class_name}') "

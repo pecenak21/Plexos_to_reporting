@@ -3,14 +3,16 @@ import numpy as np
 import os
 import io
 import sys
+import contextlib
+import traceback
 from collections import Counter
 from datetime import datetime
 
 class TeeLogger:
     """Helper class to simultaneously print to the terminal and write to a log file."""
-    def __init__(self, filename):
-        self.terminal = sys.stdout
-        self.log = open(filename, 'w', encoding='utf-8')
+    def __init__(self, log, terminal):
+        self.terminal = terminal
+        self.log = log
 
     def write(self, message):
         self.terminal.write(message)
@@ -20,9 +22,27 @@ class TeeLogger:
     def flush(self):
         self.terminal.flush()
         self.log.flush()
-        
-    def close(self):
-        self.log.close()
+
+
+@contextlib.contextmanager
+def tee_output(filename):
+    """Copy everything printed to stdout and stderr (tracebacks included) into `filename`.
+
+    Nests: an inner tee writes through the outer one, so its lines land in both logs.
+    """
+    original_stdout, original_stderr = sys.stdout, sys.stderr
+    with open(filename, 'w', encoding='utf-8') as log:
+        sys.stdout = TeeLogger(log, original_stdout)
+        sys.stderr = TeeLogger(log, original_stderr)
+        try:
+            yield
+        except BaseException:
+            # Python prints the traceback to the console only after the stack has unwound,
+            # by which point this log is closed -- so copy it into the log file here.
+            log.write(traceback.format_exc())
+            raise
+        finally:
+            sys.stdout, sys.stderr = original_stdout, original_stderr
 
 def parse_report_into_sections(filepath):
     sections = {}
@@ -208,13 +228,14 @@ def compare_report_files(golden_path, generated_path, report_name="Report", tole
         return False
 
 def run_sit_validation(baseline_dir, newreport_dir):
-    """Callable function to execute SIT validation from your main pipeline."""
-    log_file_path = os.path.join(baseline_dir, "SIT_Test_Results.log")
-    original_stdout = sys.stdout
-    tee = TeeLogger(log_file_path)
-    sys.stdout = tee
-    
-    try:
+    """Callable function to execute SIT validation from your main pipeline.
+
+    The log is written beside the generated reports, not into the baseline folder, so
+    each run keeps its own record and the checked-in baselines are never touched.
+    """
+    log_file_path = os.path.join(newreport_dir, "SIT_Test_Results.log")
+
+    with tee_output(log_file_path):
         print(f"==================================================")
         print(f" Systems Integration Testing (SIT) Execution Log")
         print(f" Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -243,12 +264,8 @@ def run_sit_validation(baseline_dir, newreport_dir):
             overall_success = False
         print("--------------------------------------------------")
         print(f"Log saved successfully to: {log_file_path}")
-        
+
         return overall_success
-        
-    finally:
-        sys.stdout = original_stdout
-        tee.close()
 
 if __name__ == "__main__":
     from create_reports import load_excel_config

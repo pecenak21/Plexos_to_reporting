@@ -5,7 +5,7 @@ import duckdb
 from collections import defaultdict
 from convert_zip_to_parquet import convert_zip_to_parquet
 from transformers import (export_block_to_csv, process_flat_block, process_daily_block, process_nested_block, process_ratings_block, process_3_block, process_23_block, process_32_block)
-from standard_integration_testing import run_sit_validation
+from standard_integration_testing import run_sit_validation, tee_output
 from database import initialize_database_structures
 import exceptions_report
 
@@ -133,7 +133,7 @@ def execute_standard_report(parquet_base_dir, blueprint, asset_groups, output_pa
                 idx_flag, header_flag = False, False
 
             elif temp_pattern in ("daily", "daily-summary"):
-                df_block = process_daily_block(parquet_base_dir, prop_input, years, unique_months, class_name=c_in, is_rate=is_rate, temporal_pattern=temp_pattern, asset_mapping=asset_mapping)
+                df_block = process_daily_block(parquet_base_dir, prop_input, years, unique_months, class_name=c_in, is_rate=is_rate, temporal_pattern=temp_pattern, asset_mapping=asset_mapping, df_units=df_units, explicit_unit=unit_val)
                 idx_flag, header_flag = True, False
             else:
                 if nested:
@@ -235,10 +235,20 @@ def execute_timeslice_report(parquet_base_dir, blueprint_rat, asset_groups, outp
             export_block_to_csv(f, header_title=title, df_block=df_block)
 
 def execute_pipeline(config_path):
-    print(f"[+] Initializing report generation from: {config_path}")
     exceptions_report.reset()
-    blueprint, blueprint_rat, asset_groups, input_path, cli_path, dir_name, df_units, script_path, asset_mapping, contract_rows = load_excel_config(config_path)
+    config = load_excel_config(config_path)
+    dir_name = config[5]
+    os.makedirs(dir_name, exist_ok=True)
 
+    # The console window closes with the run, so keep a copy of everything it shows
+    run_log_path = os.path.join(dir_name, "Run_Log.txt")
+    with tee_output(run_log_path):
+        print(f"[+] Initializing report generation from: {config_path}")
+        _generate_reports(*config)
+        print(f"[+] Run log written to: {run_log_path}")
+
+
+def _generate_reports(blueprint, blueprint_rat, asset_groups, input_path, cli_path, dir_name, df_units, script_path, asset_mapping, contract_rows):
     parquet_path_out=os.path.join(dir_name, "Parquet Files")
 
     parquet_base_dir = convert_zip_to_parquet(input_path, cli_path=cli_path, output_dir=parquet_path_out)
@@ -258,8 +268,6 @@ def execute_pipeline(config_path):
     
     years = sorted(time_df['Year'].unique())
     unique_months = time_df['Month_Label'].unique()
-
-    os.makedirs(dir_name, exist_ok=True)
 
     print("[+] Validating workbook configuration against the solution...")
     initialize_database_structures(parquet_base_dir)
